@@ -20,6 +20,7 @@ import pytest
 
 from tests.factories import btcusdt, eurusd, eurusd_lots, usdjpy
 from tradingsys.core.errors import PersistenceError
+from tradingsys.core.provenance import ProvenanceError, TickSource
 from tradingsys.persistence.audit import GENESIS_HASH, AuditCategory
 from tradingsys.venues.enums import CandlePrice, Granularity
 from tradingsys.venues.models import Candle, Quote
@@ -37,6 +38,8 @@ NOW = datetime(2025, 3, 5, 12, 0, tzinfo=UTC)
 class TestDatabase:
     async def test_health_check(self, database: Database) -> None:
         await database.check()
+        assert database.is_connected
+        assert database.pool_stats()["size"] >= 1
 
     async def test_timescale_is_installed(self, database: Database) -> None:
         version = await database.timescale_version()
@@ -77,6 +80,13 @@ class TestDatabase:
     async def test_close_is_idempotent(self, database: Database) -> None:
         await database.close()
         await database.close()
+        assert not database.is_connected
+        assert database.pool_stats() == {
+            "size": 0,
+            "idle": 0,
+            "in_use": 0,
+            "max_size": database.settings.max_pool_size,
+        }
 
     async def test_a_failed_transaction_rolls_back(
         self, database: Database, instruments: InstrumentRepository
@@ -197,9 +207,8 @@ class TestMarketDataRepository:
             high=Decimal("1.0870"),
             low=Decimal("1.0840"),
             close=Decimal(close),
-            volume=Decimal("1000"),
-            trade_count=10,
             complete=complete,
+            tick_count=10,
         )
 
     async def test_bar_round_trip(
@@ -282,7 +291,7 @@ class TestMarketDataRepository:
 
     async def test_storing_nothing_is_allowed(self, market_data: MarketDataRepository) -> None:
         assert await market_data.store_bars(1, []) == 0
-        assert await market_data.store_ticks(1, []) == 0
+        assert await market_data.store_ticks(1, TickSource.CTRADER, []) == 0
 
     async def test_an_impossible_bar_is_rejected_by_the_database(
         self, instruments: InstrumentRepository, database: Database
@@ -310,8 +319,8 @@ class TestMarketDataRepository:
             )
             for index in range(3)
         ]
-        assert await market_data.store_ticks(row_id, ticks) == 3
-        stored = await market_data.fetch_ticks(row_id)
+        assert await market_data.store_ticks(row_id, TickSource.CTRADER, ticks) == 3
+        stored = await market_data.fetch_ticks(row_id, TickSource.CTRADER)
         assert len(stored) == 3
         assert stored[0].bid == Decimal("1.08500")
         assert stored[0].bid_size == Decimal("1000000")
@@ -323,9 +332,9 @@ class TestMarketDataRepository:
         row_id = await self._prepare(instruments)
         first = Quote(eurusd().id, NOW, Decimal("1.08500"), Decimal("1.08512"))
         second = Quote(eurusd().id, NOW, Decimal("1.09000"), Decimal("1.09012"))
-        await market_data.store_ticks(row_id, [first])
-        await market_data.store_ticks(row_id, [second])
-        stored = await market_data.fetch_ticks(row_id)
+        await market_data.store_ticks(row_id, TickSource.CTRADER, [first])
+        await market_data.store_ticks(row_id, TickSource.CTRADER, [second])
+        stored = await market_data.fetch_ticks(row_id, TickSource.CTRADER)
         assert len(stored) == 1
         assert stored[0].bid == Decimal("1.08500")
 
@@ -335,7 +344,8 @@ class TestMarketDataRepository:
         row_id = await self._prepare(instruments)
         with pytest.raises(asyncpg.CheckViolationError):
             await database.execute(
-                "INSERT INTO ticks (instrument_id, ts, bid, ask) VALUES ($1, $2, 1.09, 1.08)",
+                "INSERT INTO ticks (instrument_id, source, ts, bid, ask) "
+                "VALUES ($1, 'ctrader', $2, 1.09, 1.08)",
                 row_id,
                 NOW,
             )
@@ -347,6 +357,199 @@ class TestMarketDataRepository:
                 "open, high, low, close) VALUES (999999, '5m', 'mid', $1, 1, 1, 1, 1)",
                 NOW,
             )
+
+
+class TestProvenanceSeparation:
+    """Research data must not reach the calibration path, proven against the database."""
+
+    async def _prepare(self, instruments: InstrumentRepository) -> int:
+        return await instruments.upsert(eurusd())
+
+    def _tick(self, ms: int, bid: str, ask: str) -> Quote:
+        return Quote(
+            instrument_id=eurusd().id,
+            ts=NOW + timedelta(milliseconds=ms),
+            bid=Decimal(bid),
+            ask=Decimal(ask),
+        )
+
+    async def test_two_sources_coexist_at_the_same_instant(
+        self, instruments: InstrumentRepository, market_data: MarketDataRepository
+    ) -> None:
+        # The same millisecond quoted by two pools is two observations, not a conflict.
+        # If source were not in the key, one would silently overwrite the other.
+        row_id = await self._prepare(instruments)
+        await market_data.store_ticks(
+            row_id, TickSource.CTRADER, [self._tick(0, "1.0850", "1.0851")]
+        )
+        await market_data.store_ticks(
+            row_id, TickSource.DUKASCOPY, [self._tick(0, "1.0849", "1.0852")]
+        )
+        venue = await market_data.fetch_ticks(row_id, TickSource.CTRADER)
+        research = await market_data.fetch_ticks(row_id, TickSource.DUKASCOPY)
+        assert [t.bid for t in venue] == [Decimal("1.0850")]
+        assert [t.bid for t in research] == [Decimal("1.0849")]
+
+    async def test_a_read_returns_only_the_requested_source(
+        self, instruments: InstrumentRepository, market_data: MarketDataRepository
+    ) -> None:
+        row_id = await self._prepare(instruments)
+        await market_data.store_ticks(
+            row_id, TickSource.CTRADER, [self._tick(0, "1.0850", "1.0851")]
+        )
+        await market_data.store_ticks(
+            row_id, TickSource.DUKASCOPY, [self._tick(1, "1.0849", "1.0852")]
+        )
+        assert len(await market_data.fetch_ticks(row_id, TickSource.CTRADER)) == 1
+
+    async def test_calibration_returns_execution_venue_ticks(
+        self, instruments: InstrumentRepository, market_data: MarketDataRepository
+    ) -> None:
+        row_id = await self._prepare(instruments)
+        await market_data.store_ticks(
+            row_id, TickSource.CTRADER, [self._tick(0, "1.0850", "1.0851")]
+        )
+        series = await market_data.fetch_calibration_ticks(eurusd().id, row_id, TickSource.CTRADER)
+        assert len(series) == 1
+        assert series.source is TickSource.CTRADER
+
+    async def test_calibration_refuses_a_research_source_outright(
+        self, instruments: InstrumentRepository, market_data: MarketDataRepository
+    ) -> None:
+        row_id = await self._prepare(instruments)
+        await market_data.store_ticks(
+            row_id, TickSource.DUKASCOPY, [self._tick(0, "1.0849", "1.0852")]
+        )
+        with pytest.raises(ProvenanceError, match="cannot be calibrated on"):
+            await market_data.fetch_calibration_ticks(eurusd().id, row_id, TickSource.DUKASCOPY)
+
+    async def test_the_database_view_excludes_research_rows(
+        self,
+        instruments: InstrumentRepository,
+        market_data: MarketDataRepository,
+        database: Database,
+    ) -> None:
+        # The second barrier: even a query that got the source filter wrong cannot see
+        # research rows through this view.
+        row_id = await self._prepare(instruments)
+        await market_data.store_ticks(
+            row_id, TickSource.DUKASCOPY, [self._tick(0, "1.0849", "1.0852")]
+        )
+        await market_data.store_ticks(
+            row_id, TickSource.CTRADER, [self._tick(1, "1.0850", "1.0851")]
+        )
+        visible = await database.fetch("SELECT source FROM execution_venue_ticks")
+        assert {row["source"] for row in visible} == {"ctrader"}
+        everything = await database.fetch("SELECT DISTINCT source FROM ticks")
+        assert {row["source"] for row in everything} == {"ctrader", "dukascopy"}
+
+
+class TestPerSideAggregates:
+    """Bid and ask one minute bars are derived from ticks, since no venue supplies them."""
+
+    async def test_ticks_roll_up_into_per_side_bars(
+        self,
+        instruments: InstrumentRepository,
+        market_data: MarketDataRepository,
+        database: Database,
+    ) -> None:
+        row_id = await instruments.upsert(eurusd())
+        ticks = [
+            Quote(
+                instrument_id=eurusd().id,
+                ts=NOW + timedelta(seconds=index),
+                bid=Decimal("1.0850") + Decimal(index) / 10000,
+                ask=Decimal("1.0852") + Decimal(index) / 10000,
+            )
+            for index in range(4)
+        ]
+        await market_data.store_ticks(row_id, TickSource.CTRADER, ticks)
+        await database.execute(
+            "CALL refresh_continuous_aggregate('ohlcv_1m_bid', $1::timestamptz, $2::timestamptz)",
+            NOW - timedelta(minutes=5),
+            NOW + timedelta(minutes=5),
+        )
+        rows = await database.fetch(
+            "SELECT open, high, low, close, tick_count FROM ohlcv_1m_bid "
+            "WHERE instrument_id = $1 AND source = $2",
+            row_id,
+            "ctrader",
+        )
+        assert len(rows) == 1
+        bar = rows[0]
+        assert bar["open"] == Decimal("1.0850")
+        assert bar["close"] == Decimal("1.0853")
+        assert bar["high"] == Decimal("1.0853")
+        assert bar["low"] == Decimal("1.0850")
+        assert bar["tick_count"] == 4
+
+    async def test_the_ask_aggregate_tracks_the_other_side(
+        self,
+        instruments: InstrumentRepository,
+        market_data: MarketDataRepository,
+        database: Database,
+    ) -> None:
+        row_id = await instruments.upsert(eurusd())
+        await market_data.store_ticks(
+            row_id,
+            TickSource.CTRADER,
+            [
+                Quote(
+                    instrument_id=eurusd().id,
+                    ts=NOW,
+                    bid=Decimal("1.0850"),
+                    ask=Decimal("1.0852"),
+                )
+            ],
+        )
+        await database.execute(
+            "CALL refresh_continuous_aggregate('ohlcv_1m_ask', $1::timestamptz, $2::timestamptz)",
+            NOW - timedelta(minutes=5),
+            NOW + timedelta(minutes=5),
+        )
+        rows = await database.fetch(
+            "SELECT open FROM ohlcv_1m_ask WHERE instrument_id = $1", row_id
+        )
+        assert [row["open"] for row in rows] == [Decimal("1.0852")]
+
+    async def test_research_and_venue_bars_do_not_merge(
+        self,
+        instruments: InstrumentRepository,
+        market_data: MarketDataRepository,
+        database: Database,
+    ) -> None:
+        row_id = await instruments.upsert(eurusd())
+        await market_data.store_ticks(
+            row_id,
+            TickSource.CTRADER,
+            [
+                Quote(
+                    instrument_id=eurusd().id, ts=NOW, bid=Decimal("1.0850"), ask=Decimal("1.0851")
+                )
+            ],
+        )
+        await market_data.store_ticks(
+            row_id,
+            TickSource.DUKASCOPY,
+            [
+                Quote(
+                    instrument_id=eurusd().id, ts=NOW, bid=Decimal("1.0840"), ask=Decimal("1.0841")
+                )
+            ],
+        )
+        await database.execute(
+            "CALL refresh_continuous_aggregate('ohlcv_1m_bid', $1::timestamptz, $2::timestamptz)",
+            NOW - timedelta(minutes=5),
+            NOW + timedelta(minutes=5),
+        )
+        rows = await database.fetch(
+            "SELECT source, open FROM ohlcv_1m_bid WHERE instrument_id = $1 ORDER BY source",
+            row_id,
+        )
+        assert [(row["source"], row["open"]) for row in rows] == [
+            ("ctrader", Decimal("1.0850")),
+            ("dukascopy", Decimal("1.0840")),
+        ]
 
 
 class TestAuditLogStorage:

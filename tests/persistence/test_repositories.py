@@ -7,6 +7,7 @@ through PostgreSQL are covered in test_integration.py.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -16,6 +17,7 @@ import pytest
 from tests.factories import btcusdt, eurusd, eurusd_lots
 from tradingsys.core.errors import PersistenceError
 from tradingsys.core.instrument import InstrumentId
+from tradingsys.core.provenance import TickSource
 from tradingsys.persistence.repositories import (
     INSTRUMENT_ARG_ORDER,
     UPSERT_BAR,
@@ -66,6 +68,14 @@ class TestInstrumentArguments:
 
 
 class TestBarStatement:
+    def test_the_two_volume_columns_are_written_separately(self) -> None:
+        # One column holding both meanings is what this replaced. The word boundary
+        # matters: traded_volume contains volume as a substring.
+        assert "tick_count" in UPSERT_BAR
+        assert "traded_volume" in UPSERT_BAR
+        assert not re.search(r"\bvolume\b", UPSERT_BAR)
+        assert not re.search(r"\btrade_count\b", UPSERT_BAR)
+
     def test_a_closed_bar_is_never_overwritten(self) -> None:
         # The guard is what stops a late correction from rewriting a bar that a
         # decision was already made on.
@@ -117,20 +127,32 @@ class TestBarQuery:
 
 class TestTickQuery:
     def test_minimal_query(self) -> None:
-        query, args = build_tick_query(7)
-        assert args == [7]
+        query, args = build_tick_query(7, TickSource.CTRADER)
+        assert args == [7, "ctrader"]
+        assert "source = $2" in query
         assert query.endswith("ORDER BY ts ASC")
 
     def test_bounds_and_limit(self) -> None:
-        query, args = build_tick_query(7, start=NOW, end=NOW, limit=10)
-        assert "ts >= $2" in query
-        assert "ts < $3" in query
-        assert query.endswith("LIMIT $4")
-        assert args == [7, NOW, NOW, 10]
+        query, args = build_tick_query(7, TickSource.CTRADER, start=NOW, end=NOW, limit=10)
+        assert "ts >= $3" in query
+        assert "ts < $4" in query
+        assert query.endswith("LIMIT $5")
+        assert args == [7, "ctrader", NOW, NOW, 10]
 
     def test_a_non_positive_limit_is_rejected(self) -> None:
         with pytest.raises(PersistenceError, match="limit must be at least 1"):
-            build_tick_query(7, limit=-5)
+            build_tick_query(7, TickSource.CTRADER, limit=-5)
+
+    def test_an_ordinary_read_uses_the_full_tick_view(self) -> None:
+        query, _ = build_tick_query(7, TickSource.DUKASCOPY)
+        assert "ticks_with_instrument" in query
+
+    def test_a_calibration_read_uses_the_execution_venue_view(self) -> None:
+        # Two barriers: the view excludes research rows in the database, and the return
+        # type refuses them in Python.
+        query, _ = build_tick_query(7, TickSource.CTRADER, calibration=True)
+        assert "execution_venue_ticks" in query
+        assert "ticks_with_instrument" not in query
 
 
 class TestRowMapping:
@@ -147,8 +169,8 @@ class TestRowMapping:
                 high=Decimal("1.0860"),
                 low=Decimal("1.0845"),
                 close=Decimal("1.0855"),
-                volume=Decimal("1234"),
-                trade_count=42,
+                tick_count=42,
+                traded_volume=Decimal("1234"),
                 complete=True,
             )
         )
@@ -156,7 +178,8 @@ class TestRowMapping:
         assert bar.granularity is Granularity.M5
         assert bar.price is CandlePrice.MID
         assert bar.close == Decimal("1.0855")
-        assert bar.trade_count == 42
+        assert bar.tick_count == 42
+        assert bar.traded_volume == Decimal("1234")
 
     def test_candle_mapping_rejects_an_impossible_bar(self) -> None:
         # A row that violates the OHLC relationship must not become a Candle, even
@@ -174,8 +197,8 @@ class TestRowMapping:
                     high=Decimal("1.0800"),
                     low=Decimal("1.0845"),
                     close=Decimal("1.0855"),
-                    volume=Decimal(0),
-                    trade_count=0,
+                    tick_count=0,
+                    traded_volume=None,
                     complete=True,
                 )
             )
@@ -186,6 +209,7 @@ class TestRowMapping:
                 instrument_id=7,
                 venue="fxbroker",
                 symbol="EUR/USD",
+                source="ctrader",
                 ts=NOW,
                 bid=Decimal("1.08500"),
                 ask=Decimal("1.08512"),
@@ -205,6 +229,7 @@ class TestRowMapping:
                     instrument_id=7,
                     venue="fxbroker",
                     symbol="EUR/USD",
+                    source="ctrader",
                     ts=NOW,
                     bid=Decimal("1.09"),
                     ask=Decimal("1.08"),

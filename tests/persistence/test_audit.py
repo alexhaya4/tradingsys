@@ -92,6 +92,51 @@ class TestCanonicalJson:
             canonical_json(payload)
 
 
+class TestTheDigestIsPinned:
+    """The one test here that is not self-referential.
+
+    Every other hash test compares one output of ``compute_entry_hash`` against
+    another, so all of them would keep passing if the canonical form changed: reorder
+    the fields, swap the separator, drop the timestamp, and the chain stays internally
+    consistent while every previously written digest becomes unverifiable.
+
+    This pins the algorithm to a value computed once and written down. If it fails, the
+    hash input changed, and either that was deliberate, in which case every stored
+    audit log needs rehashing and a migration, or it was an accident.
+    """
+
+    GOLDEN = "dc599ee5046a3fb52f02774ffb510f273eda76d22bb25f2f8ec1b2e94af14d62"
+
+    def test_a_known_entry_hashes_to_a_known_digest(self) -> None:
+        digest = compute_entry_hash(
+            sequence=1,
+            ts=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+            correlation_id="fixed-correlation",
+            category=AuditCategory.RISK,
+            actor="risk.position_sizer",
+            action="rejected_order",
+            summary="exposure limit exceeded",
+            payload={"limit": "10000", "requested": "12500"},
+            instrument_id="fxbroker:EUR/USD",
+            previous_hash=GENESIS_HASH,
+        )
+        assert digest == self.GOLDEN
+
+    def test_the_same_entry_built_through_the_dataclass_agrees(self) -> None:
+        record = AuditEntry(
+            sequence=1,
+            ts=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+            correlation_id="fixed-correlation",
+            category=AuditCategory.RISK,
+            actor="risk.position_sizer",
+            action="rejected_order",
+            summary="exposure limit exceeded",
+            payload={"limit": "10000", "requested": "12500"},
+            instrument_id="fxbroker:EUR/USD",
+        )
+        assert record.entry_hash == self.GOLDEN
+
+
 class TestEntryHash:
     def test_is_deterministic(self) -> None:
         assert entry().entry_hash == entry().entry_hash

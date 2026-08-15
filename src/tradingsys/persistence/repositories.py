@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Final, final
 
 from tradingsys.core.errors import PersistenceError
 from tradingsys.core.instrument import Instrument, InstrumentId
+from tradingsys.core.provenance import CalibrationTicks, ProvenanceError, TickSource
 from tradingsys.venues.enums import CandlePrice, Granularity
 from tradingsys.venues.models import Candle, Quote
 
@@ -86,7 +87,7 @@ financing, schedule, status
 UPSERT_BAR: Final = """
 INSERT INTO ohlcv_bars (
     instrument_id, granularity, price_component, ts, open, high, low, close,
-    volume, trade_count, complete
+    tick_count, traded_volume, complete
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 ON CONFLICT (instrument_id, granularity, price_component, ts) DO UPDATE SET
@@ -94,8 +95,8 @@ ON CONFLICT (instrument_id, granularity, price_component, ts) DO UPDATE SET
     high = excluded.high,
     low = excluded.low,
     close = excluded.close,
-    volume = excluded.volume,
-    trade_count = excluded.trade_count,
+    tick_count = excluded.tick_count,
+    traded_volume = excluded.traded_volume,
     complete = excluded.complete
 WHERE ohlcv_bars.complete = false
 """
@@ -107,9 +108,9 @@ is restricted rather than unconditional.
 """
 
 INSERT_TICK: Final = """
-INSERT INTO ticks (instrument_id, ts, bid, ask, bid_size, ask_size, tradeable)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-ON CONFLICT (instrument_id, ts) DO NOTHING
+INSERT INTO ticks (instrument_id, source, ts, bid, ask, bid_size, ask_size, tradeable)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (instrument_id, source, ts) DO NOTHING
 """
 
 
@@ -273,8 +274,8 @@ class MarketDataRepository:
                 bar.high,
                 bar.low,
                 bar.close,
-                bar.volume,
-                bar.trade_count,
+                bar.tick_count,
+                bar.traded_volume,
                 bar.complete,
             )
             for bar in bars
@@ -300,18 +301,22 @@ class MarketDataRepository:
         rows = await self._database.fetch(query, *args)
         return tuple(candle_from_row(row) for row in rows)
 
-    async def store_ticks(self, instrument_row_id: int, ticks: Sequence[Quote]) -> int:
-        """Write ticks, ignoring any already stored for the same instant.
+    async def store_ticks(
+        self, instrument_row_id: int, source: TickSource, ticks: Sequence[Quote]
+    ) -> int:
+        """Write ticks from one source, ignoring any already stored for the same instant.
 
-        A duplicate timestamp is a repeat of the same observation, so it is dropped
-        rather than overwritten: the first value received is the one that decisions
-        were made on.
+        A duplicate timestamp from the same source is a repeat of the same observation,
+        so it is dropped rather than overwritten: the first value received is the one
+        decisions were made on. Two different sources quoting the same instant are two
+        separate observations and both are kept.
         """
         if not ticks:
             return 0
         rows = [
             (
                 instrument_row_id,
+                source.value,
                 tick.ts,
                 tick.bid,
                 tick.ask,
@@ -328,15 +333,54 @@ class MarketDataRepository:
     async def fetch_ticks(
         self,
         instrument_row_id: int,
+        source: TickSource,
         *,
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int | None = None,
     ) -> Sequence[Quote]:
-        """Ticks in ascending time order over a half open range."""
-        query, args = build_tick_query(instrument_row_id, start=start, end=end, limit=limit)
+        """Ticks from one source in ascending time order over a half open range.
+
+        The source is required rather than optional. Ticks from two liquidity pools
+        interleaved into one series would be meaningless, and defaulting to "all of
+        them" would make that the easy thing to do by accident.
+        """
+        query, args = build_tick_query(instrument_row_id, source, start=start, end=end, limit=limit)
         rows = await self._database.fetch(query, *args)
         return tuple(quote_from_row(row) for row in rows)
+
+    async def fetch_calibration_ticks(
+        self,
+        instrument_id: InstrumentId,
+        instrument_row_id: int,
+        source: TickSource,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int | None = None,
+    ) -> CalibrationTicks[Quote]:
+        """Ticks eligible for cost model calibration.
+
+        Reads the ``execution_venue_ticks`` view rather than ``ticks``, so research
+        data is filtered out in the database as well as refused by the return type.
+        Two independent barriers, because getting this wrong produces a backtest that
+        looks right.
+
+        Raises:
+            ProvenanceError: ``source`` is a research source.
+        """
+        if not source.is_execution_venue:
+            raise ProvenanceError(
+                f"{source.value} is {source.provenance.value} and cannot be calibrated "
+                f"on. Its spreads are not the spreads we will pay."
+            )
+        query, args = build_tick_query(
+            instrument_row_id, source, start=start, end=end, limit=limit, calibration=True
+        )
+        rows = await self._database.fetch(query, *args)
+        return CalibrationTicks.of(
+            instrument_id, source, tuple(quote_from_row(row) for row in rows)
+        )
 
     async def latest_bar_start(
         self, instrument_row_id: int, granularity: Granularity, price: CandlePrice
@@ -385,7 +429,7 @@ def build_bar_query(
         suffix = f" LIMIT ${len(args)}"
     query = (
         "SELECT instrument_id, venue, symbol, granularity, price_component, ts, open, high, "
-        "low, close, volume, trade_count, complete FROM ohlcv_bars_with_instrument WHERE "
+        "low, close, tick_count, traded_volume, complete FROM ohlcv_bars_with_instrument WHERE "
         f"{' AND '.join(conditions)} ORDER BY ts ASC{suffix}"
     )
     return query, args
@@ -393,14 +437,27 @@ def build_bar_query(
 
 def build_tick_query(
     instrument_row_id: int,
+    source: TickSource,
     *,
     start: datetime | None = None,
     end: datetime | None = None,
     limit: int | None = None,
+    calibration: bool = False,
 ) -> tuple[str, list[object]]:
-    """Build the tick selection statement and its arguments."""
-    args: list[object] = [instrument_row_id]
-    conditions = ["instrument_id = $1"]
+    """Build the tick selection statement and its arguments.
+
+    Args:
+        instrument_row_id: Surrogate key of the instrument.
+        source: Which feed to read. Never optional: interleaving two liquidity pools
+            into one series would be meaningless.
+        start: Inclusive lower bound.
+        end: Exclusive upper bound.
+        limit: Maximum rows.
+        calibration: Read the execution venue view instead of the base table, so that
+            research rows cannot be returned even if the source filter were wrong.
+    """
+    args: list[object] = [instrument_row_id, source.value]
+    conditions = ["instrument_id = $1", "source = $2"]
     if start is not None:
         args.append(start)
         conditions.append(f"ts >= ${len(args)}")
@@ -413,9 +470,10 @@ def build_tick_query(
             raise PersistenceError(f"limit must be at least 1, got {limit}")
         args.append(limit)
         suffix = f" LIMIT ${len(args)}"
+    table = "execution_venue_ticks" if calibration else "ticks_with_instrument"
     query = (
-        "SELECT instrument_id, venue, symbol, ts, bid, ask, bid_size, ask_size, tradeable "
-        f"FROM ticks_with_instrument WHERE {' AND '.join(conditions)} ORDER BY ts ASC{suffix}"
+        "SELECT instrument_id, venue, symbol, source, ts, bid, ask, bid_size, ask_size, "
+        f"tradeable FROM {table} WHERE {' AND '.join(conditions)} ORDER BY ts ASC{suffix}"
     )
     return query, args
 
@@ -431,8 +489,8 @@ def candle_from_row(row: asyncpg.Record) -> Candle:
         high=row["high"],
         low=row["low"],
         close=row["close"],
-        volume=row["volume"],
-        trade_count=int(row["trade_count"]),
+        tick_count=None if row["tick_count"] is None else int(row["tick_count"]),
+        traded_volume=row["traded_volume"],
         complete=bool(row["complete"]),
     )
 
