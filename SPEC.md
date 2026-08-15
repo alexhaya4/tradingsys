@@ -2,7 +2,9 @@
 
 **Status:** Living document. Authoritative.
 **Owner:** Alex (director). Implementation delegated to Claude Code sessions.
-**Last structural revision:** Phase 1 in progress.
+**Last structural revision:** End of phase 1. Forex venue changed from OANDA to
+cTrader; capital, instrument universe, retention, price component, and position
+model decisions recorded in sections 3.3, 4.0, and 6.
 
 ---
 
@@ -151,8 +153,33 @@ and cryptocurrency venues:
 | Settlement | none, margin positions | spot settles, perpetuals do not |
 
 No venue-specific field name, identifier format, or enum value appears in the
-base interfaces. Reference implementation targets are OANDA v20 for foreign
+base interfaces. Implementation targets are cTrader Open API for foreign
 exchange and ccxt with a native WebSocket client for cryptocurrency.
+
+The abstraction must also accommodate credentials that expire. A static key and
+secret does not; an OAuth2 credential set does, and refreshing one can rotate
+the refresh token itself. Expiry and renewal are therefore part of the venue
+interface, and a renewal returns the new material to its caller rather than
+absorbing it, because the replacement has to be persisted before the process
+next restarts.
+
+**Forex venue: cTrader Open API via Pepperstone.** Decided during phase 1,
+before any adapter was written.
+
+OANDA is out. It does not accept registrations from Kenya, so it was never
+available, and discovering that after building an adapter would have been
+expensive. The account is a Pepperstone demo, number 5325402, Razor account
+type, denominated in USD, with broker leverage of 1:400. That leverage figure
+is what the broker permits, not what this system uses: the risk engine enforces
+its own cap far below it, and the broker number appears here only so that
+nobody mistakes the venue limit for the system limit.
+
+This change is the venue abstraction earning its keep on day two. cTrader
+differs from OANDA in transport, authentication, sizing convention, and
+position model, and the change required no alteration to `MarketDataSource` or
+`ExecutionVenue`. The interfaces stay free of any single venue's assumptions,
+and this is the standard they are held to: if a venue change forces an
+interface change, the interface was wrong.
 
 ### 3.4 Technology decisions
 
@@ -165,14 +192,15 @@ exchange and ccxt with a native WebSocket client for cryptocurrency.
 | DB driver | asyncpg | Async, no ORM overhead in hot paths. |
 | Migrations | Alembic | Versioned, reversible schema. |
 | State and IPC | Redis 7 | Streams, position cache, idempotency keys. |
-| Crypto venue | ccxt plus native WebSocket | Unified REST, direct stream for latency. |
-| Forex venue | OANDA v20 | Real streaming, identical practice endpoints. |
+| Crypto venue | Bybit, through ccxt plus native WebSocket | Unified REST, direct stream for latency. Supports both position models. |
+| Forex venue | cTrader Open API, via Pepperstone | Available from Kenya, which OANDA is not. Demo and live share one API shape. |
 | Logging | structlog, JSON | Machine parseable, correlation IDs. |
 | Metrics | Prometheus plus Grafana | Standard, self-hosted, no vendor lock. |
 | Testing | pytest, pytest-asyncio, hypothesis | Property tests for money and sizing math. |
 | Deployment | Docker Compose, systemd supervision | Reproducible, restartable, simple. |
 
-Rejected: Rust for the core, because it buys latency the strategy does not
+Rejected: OANDA v20, which does not accept registrations from Kenya. Rejected:
+Rust for the core, because it buys latency the strategy does not
 need at the cost of the entire data and language-processing ecosystem. Rejected:
 any hosted backtesting framework, because opaque cost modeling invalidates the
 go/no-go decision that the whole project depends on.
@@ -184,12 +212,57 @@ go/no-go decision that the whole project depends on.
 Core entities. Full DDL lives in Alembic migrations; this is the conceptual
 map.
 
+### 4.0 Scope, capital, and storage policy
+
+Decided during phase 1.
+
+**Instrument universe.** EUR/USD, GBP/USD, USD/JPY, and AUD/USD on forex;
+BTC/USDT and ETH/USDT on crypto. Base accounting currency is USD.
+
+**Capital: 200 USD.** The demo account is funded to match the intended live
+capital deliberately, so that paper results at the phase 8 gate are comparable
+to what live trading would have produced rather than flattering it. Risk limits
+stay percentage-based, never absolute.
+
+Small capital interacts with venue minimums, and the interaction is a
+correctness problem rather than an inconvenience. Before an instrument is
+traded, the system validates that 1 percent per-trade risk yields a position
+size at or above that instrument's minimum, at its current price and step size.
+Where it does not, **the instrument is excluded and the exclusion is reported.**
+Raising the risk limit to make an instrument tradeable is forbidden: that
+inverts the relationship between risk policy and venue constraints, and it is
+how an account gets sized by what the broker will accept rather than by what
+the strategy can afford to lose.
+
+**Retention.** Ticks are compressed after 7 days and retained for 24 months.
+One minute bars are never dropped. Higher timeframes are derived on read
+through continuous aggregates rather than stored as separate raw series, so
+there is exactly one authoritative copy of any given observation and no
+possibility of two timeframes disagreeing. Both windows are configuration
+values, not constants.
+
+**Price components.** Bid and ask candles are stored as separate series. Mid is
+computed on read, is used only for signal generation, and is never stored as
+authoritative and never used for fill simulation. Fills use the side crossed:
+a buy fills at the ask, a sell fills at the bid. Backtesting on mid while
+executing on ask is a systematic bias in the direction of flattering results,
+which is precisely the error the phase 8 gate exists to catch.
+
+**Position model.** Both netting and hedging are modelled at the venue
+abstraction, because cTrader is natively hedging and Bybit supports both. The
+system's own policy is netting: at most one open position per instrument,
+enforced by the risk engine regardless of what the venue permits. A venue that
+allows two opposing positions in one instrument allows an accounting state the
+risk engine cannot reason about, so the constraint is imposed above the venue
+rather than inherited from it.
+
 **instrument** Canonical instrument registry. Venue-neutral symbol, venue
 symbol mapping, asset class, quote currency, price precision, minimum size,
 size increment, financing model.
 
-**ohlcv** Hypertable. Instrument, venue, timeframe, open time, OHLC as
-Decimal, volume, and a completeness flag. Partitioned by time.
+**ohlcv** Hypertable. Instrument, venue, timeframe, price component, open time,
+OHLC as Decimal, volume, and a completeness flag. Partitioned by time. Bid and
+ask are separate series; see section 4.0.
 
 **tick** Hypertable. Instrument, venue, timestamp, bid, ask, bid size, ask
 size. Retained at higher resolution for a shorter window than bars.
@@ -283,7 +356,12 @@ tested.
 
 **Per-trade risk.** A fixed fraction of account equity at risk per position,
 determined by stop distance, not by a fixed lot size. Default ceiling: 1.0
-percent. Hard cap: 2.0 percent.
+percent. Hard cap: 2.0 percent. Where 1 percent does not reach an instrument's
+minimum size, that instrument is excluded and the exclusion is reported. The
+limit is never raised to fit a venue minimum.
+
+**One position per instrument.** Enforced by the risk engine as system policy,
+independent of whether the venue is netting or hedging.
 
 **Stop loss.** Mandatory on every position. Placed as a venue-side order at
 submission time, not maintained only in local memory, so that a process crash
