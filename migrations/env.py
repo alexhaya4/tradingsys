@@ -57,7 +57,23 @@ def do_run_migrations(connection: Connection) -> None:
 async def run_async_migrations() -> None:
     section = config.get_section(config.config_ini_section, {})
     section["sqlalchemy.url"] = _database_url()
-    connectable = async_engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
+    # Prepared statement caching is disabled for migrations, and this is load bearing.
+    #
+    # With caching on, a run that applies more than one revision fails with
+    # "compression not enabled on hypertable" from add_compression_policy, immediately
+    # after the ALTER TABLE that enabled compression. The same revisions applied one
+    # per invocation succeed, and the same statements run by hand in psql succeed, so
+    # the symptom looks like a TimescaleDB catalogue problem and is not: TimescaleDB's
+    # DDL hooks do not fire for statements executed through the extended query protocol
+    # with a cached plan.
+    #
+    # Diagnosing this cost an afternoon. Leave the cache off.
+    connectable = async_engine_from_config(
+        section,
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+        connect_args={"prepared_statement_cache_size": 0, "statement_cache_size": 0},
+    )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
     await connectable.dispose()
