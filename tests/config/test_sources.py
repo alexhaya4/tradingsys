@@ -55,7 +55,9 @@ class TestSecretFieldDiscovery:
     def test_finds_nested_secret_fields_of_the_real_settings_model(self) -> None:
         paths = secret_field_paths(Settings)
         assert ("database", "password") in paths
-        assert ("venues", "forex", "api_token") in paths
+        assert ("venues", "forex", "client_secret") in paths
+        assert ("venues", "forex", "access_token") in paths
+        assert ("venues", "forex", "refresh_token") in paths
         assert ("venues", "crypto", "api_key") in paths
         assert ("venues", "crypto", "api_secret") in paths
 
@@ -79,22 +81,38 @@ class TestSecretFieldDiscovery:
 
 class TestSecretRejection:
     def test_plain_data_is_accepted(self) -> None:
-        reject_secrets_from_files({"database": {"host": "db"}}, Settings, "base.toml")
+        # A file full of legitimate non-secret settings, including account_id, which
+        # sits right beside four secrets in the same section, passes untouched. The
+        # differential matters more than the acceptance: the same payload with one
+        # secret added is refused, so what is being detected is the secret and not
+        # merely the shape of the data.
+        clean = {
+            "database": {"host": "db", "port": 5432, "user": "tradingsys"},
+            "venues": {"forex": {"enabled": True, "account_id": "5325402"}},
+        }
+        reject_secrets_from_files(clean, Settings, "base.toml")
+
+        contaminated = {
+            "database": {"host": "db", "port": 5432, "user": "tradingsys"},
+            "venues": {"forex": {"enabled": True, "account_id": "5325402", "client_secret": "x"}},
+        }
+        with pytest.raises(SecretInConfigFileError, match=r"venues\.forex\.client_secret"):
+            reject_secrets_from_files(contaminated, Settings, "base.toml")
 
     def test_a_top_level_secret_is_rejected(self) -> None:
         with pytest.raises(SecretInConfigFileError, match=r"database\.password"):
             reject_secrets_from_files({"database": {"password": "hunter2"}}, Settings, "base.toml")
 
     def test_a_nested_venue_secret_is_rejected(self) -> None:
-        with pytest.raises(SecretInConfigFileError, match=r"venues\.forex\.api_token"):
+        with pytest.raises(SecretInConfigFileError, match=r"venues\.forex\.client_secret"):
             reject_secrets_from_files(
-                {"venues": {"forex": {"api_token": "abc"}}}, Settings, "base.toml"
+                {"venues": {"forex": {"client_secret": "abc"}}}, Settings, "base.toml"
             )
 
     def test_a_secret_under_an_arbitrarily_keyed_map_is_rejected(self) -> None:
         with pytest.raises(SecretInConfigFileError, match=r"venues\.crypto\.api_key"):
             reject_secrets_from_files(
-                {"venues": {"crypto": {"binance": {"api_key": "abc"}}}}, Settings, "base.toml"
+                {"venues": {"crypto": {"bybit": {"api_key": "abc"}}}}, Settings, "base.toml"
             )
 
     def test_every_offender_is_listed(self) -> None:
@@ -103,7 +121,7 @@ class TestSecretRejection:
                 {
                     "database": {"password": "a"},
                     "redis": {"password": "b"},
-                    "venues": {"forex": {"api_token": "c"}},
+                    "venues": {"forex": {"client_secret": "c"}},
                 },
                 Settings,
                 "base.toml",
@@ -111,7 +129,7 @@ class TestSecretRejection:
         message = str(caught.value)
         assert "database.password" in message
         assert "redis.password" in message
-        assert "venues.forex.api_token" in message
+        assert "venues.forex.client_secret" in message
 
     def test_the_error_names_the_file_and_suggests_an_env_var(self) -> None:
         with pytest.raises(SecretInConfigFileError) as caught:
@@ -172,9 +190,9 @@ class TestTomlLayeredSource:
 
     def test_secrets_in_the_environment_file_are_fatal(self, tmp_path: Path) -> None:
         (tmp_path / "base.toml").write_text('[app]\nname = "base"\n')
-        (tmp_path / "production.toml").write_text('[venues.forex]\napi_token = "abc"\n')
+        (tmp_path / "production.toml").write_text('[venues.forex]\nclient_secret = "abc"\n')
         source = TomlLayeredSource(Settings, config_dir=tmp_path, environment="production")
-        with pytest.raises(SecretInConfigFileError, match=r"venues\.forex\.api_token"):
+        with pytest.raises(SecretInConfigFileError, match=r"venues\.forex\.client_secret"):
             source()
 
     def test_the_file_is_read_once(self, tmp_path: Path) -> None:

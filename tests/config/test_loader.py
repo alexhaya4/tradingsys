@@ -107,17 +107,17 @@ class TestLayering:
         (config_dir / "base.toml").write_text(
             MINIMAL_BASE
             + """
-[venues.crypto.binance]
+[venues.crypto.bybit]
 enabled = false
-exchange_id = "binance"
+exchange_id = "bybit"
 sandbox = true
 """
         )
-        settings = load(config_dir, env(TRADINGSYS_VENUES__CRYPTO__BINANCE__API_KEY="key-from-env"))
-        binance = settings.venues.crypto["binance"]
-        assert binance.api_key is not None
-        assert binance.api_key.get_secret_value() == "key-from-env"
-        assert binance.exchange_id == "binance"  # still from the file
+        settings = load(config_dir, env(TRADINGSYS_VENUES__CRYPTO__BYBIT__API_KEY="key-from-env"))
+        bybit = settings.venues.crypto["bybit"]
+        assert bybit.api_key is not None
+        assert bybit.api_key.get_secret_value() == "key-from-env"
+        assert bybit.exchange_id == "bybit"  # still from the file
 
     def test_a_secret_from_the_secrets_directory_is_used(
         self, config_dir: Path, tmp_path: Path
@@ -214,8 +214,8 @@ class TestFailureReporting:
     def test_env_var_naming(self) -> None:
         assert env_var_for("database.password") == "TRADINGSYS_DATABASE__PASSWORD"
         assert (
-            env_var_for("venues.crypto.binance.api_key")
-            == "TRADINGSYS_VENUES__CRYPTO__BINANCE__API_KEY"
+            env_var_for("venues.crypto.bybit.api_key")
+            == "TRADINGSYS_VENUES__CRYPTO__BYBIT__API_KEY"
         )
 
 
@@ -229,9 +229,9 @@ class TestSecretsNeverComeFromFiles:
 
     def test_a_venue_token_in_an_environment_file_aborts_startup(self, config_dir: Path) -> None:
         (config_dir / "staging.toml").write_text(
-            '[app]\nenvironment = "staging"\n\n[venues.forex]\napi_token = "oops"\n'
+            '[app]\nenvironment = "staging"\n\n[venues.forex]\nclient_secret = "oops"\n'
         )
-        with pytest.raises(SecretInConfigFileError, match=r"venues\.forex\.api_token"):
+        with pytest.raises(SecretInConfigFileError, match=r"venues\.forex\.client_secret"):
             load(config_dir, environment=Environment.STAGING)
 
 
@@ -255,45 +255,128 @@ class TestValidationRules:
         with pytest.raises(ConfigurationError, match="production must log in json"):
             load(config_dir, environment=Environment.PRODUCTION)
 
-    def test_a_venue_url_must_be_https(self, config_dir: Path) -> None:
+    def test_the_token_url_must_be_https(self, config_dir: Path) -> None:
+        # A client secret is posted to this endpoint, so plaintext http would put it on
+        # the wire in the clear.
         (config_dir / "base.toml").write_text(
             MINIMAL_BASE
-            + """
-[venues.forex]
-enabled = false
-environment = "practice"
-rest_url = "http://api.example.com"
-stream_url = "https://stream.example.com"
-request_timeout_seconds = 10.0
-stream_read_timeout_seconds = 20.0
-max_retries = 3
-retry_backoff_seconds = 0.5
-max_requests_per_second = 30.0
-"""
+            + _forex_section(enabled=False).replace(
+                "https://openapi.example.com/apps/token", "http://openapi.example.com/apps/token"
+            )
         )
         with pytest.raises(ConfigurationError, match="must be an https URL"):
             load(config_dir)
 
     def test_enabling_a_venue_without_credentials_is_rejected(self, config_dir: Path) -> None:
         (config_dir / "base.toml").write_text(MINIMAL_BASE + _forex_section(enabled=True))
-        with pytest.raises(ConfigurationError, match="account_id, api_token"):
+        with pytest.raises(ConfigurationError) as caught:
             load(config_dir)
+        message = str(caught.value)
+        # Every absent field is named, not just the first: supplying five variables one
+        # error at a time is a miserable way to configure a venue.
+        for field in ("account_id", "client_id", "client_secret", "access_token", "refresh_token"):
+            assert field in message
+
+    def test_a_partially_configured_venue_names_only_what_is_absent(self, config_dir: Path) -> None:
+        (config_dir / "base.toml").write_text(MINIMAL_BASE + _forex_section(enabled=True))
+        supplied = dict(FOREX_CREDENTIALS)
+        del supplied["TRADINGSYS_VENUES__FOREX__REFRESH_TOKEN"]
+        with pytest.raises(ConfigurationError) as caught:
+            load(config_dir, env(**supplied))
+        message = str(caught.value)
+        assert "refresh_token" in message
+        assert "client_secret" not in message
+        assert "TRADINGSYS_VENUES__FOREX__REFRESH_TOKEN" in message
 
     def test_enabling_a_venue_with_credentials_from_the_environment_works(
         self, config_dir: Path
     ) -> None:
         (config_dir / "base.toml").write_text(MINIMAL_BASE + _forex_section(enabled=True))
-        settings = load(
-            config_dir,
-            env(
-                TRADINGSYS_VENUES__FOREX__ACCOUNT_ID="001-001-1234567-001",
-                TRADINGSYS_VENUES__FOREX__API_TOKEN="token",
-            ),
-        )
+        settings = load(config_dir, env(**FOREX_CREDENTIALS))
         assert settings.venues.forex is not None
-        account_id, token = settings.venues.forex.credentials
-        assert account_id == "001-001-1234567-001"
-        assert token.get_secret_value() == "token"
+        assert settings.venues.forex.has_credentials
+        account_id, credentials = settings.venues.forex.require_credentials()
+        assert account_id == "5325402"
+        assert credentials.client_id.get_secret_value() == "client-id"
+        assert credentials.client_secret.get_secret_value() == "client-secret"
+        assert credentials.access_token.get_secret_value() == "access-token"
+        assert credentials.refresh_token.get_secret_value() == "refresh-token"
+
+    def test_a_disabled_venue_refuses_to_hand_out_credentials(self, config_dir: Path) -> None:
+        (config_dir / "base.toml").write_text(MINIMAL_BASE + _forex_section(enabled=False))
+        settings = load(config_dir)
+        assert settings.venues.forex is not None
+        assert not settings.venues.forex.has_credentials
+        with pytest.raises(ValueError, match="not fully configured"):
+            settings.venues.forex.require_credentials()
+
+
+class TestTheEndpointCannotBeMismatched:
+    """The demo and live endpoints are fully separated at the venue.
+
+    A live endpoint cannot serve a demo account or the reverse, so the configuration
+    must not be able to express the combination at all.
+    """
+
+    def test_a_practice_environment_selects_the_demo_host(self, config_dir: Path) -> None:
+        (config_dir / "base.toml").write_text(
+            MINIMAL_BASE + _forex_section(enabled=False, venue_environment="practice")
+        )
+        forex = load(config_dir).venues.forex
+        assert forex is not None
+        assert forex.api_host == "demo.example.com"
+
+    def test_a_live_environment_selects_the_live_host(self, config_dir: Path) -> None:
+        (config_dir / "production.toml").write_text(
+            '[app]\nenvironment = "production"\nallow_live_trading = true\n'
+            + _forex_section(enabled=False, venue_environment="live")
+        )
+        forex = load(config_dir, environment=Environment.PRODUCTION).venues.forex
+        assert forex is not None
+        assert forex.api_host == "live.example.com"
+
+    def test_there_is_no_field_in_which_to_express_a_mismatch(self, config_dir: Path) -> None:
+        # The host is derived from the environment, so a config that tries to name one
+        # directly is rejected as an unknown key rather than silently honoured.
+        (config_dir / "base.toml").write_text(
+            MINIMAL_BASE + _forex_section(enabled=False) + '\napi_host = "live.example.com"\n'
+        )
+        with pytest.raises(ConfigurationError, match="api_host"):
+            load(config_dir)
+
+    def test_the_two_hosts_must_differ(self, config_dir: Path) -> None:
+        (config_dir / "base.toml").write_text(
+            MINIMAL_BASE
+            + _forex_section(enabled=False).replace(
+                'live_api_host = "live.example.com"', 'live_api_host = "demo.example.com"'
+            )
+        )
+        with pytest.raises(ConfigurationError, match="cannot share a hostname"):
+            load(config_dir)
+
+    def test_the_shipped_configuration_separates_them(self) -> None:
+        practice = load_settings(
+            config_dir=REPO_CONFIG_DIR,
+            environment=Environment.STAGING,
+            environ=env(**FOREX_CREDENTIALS),
+        ).venues.forex
+        live = load_settings(
+            config_dir=REPO_CONFIG_DIR, environment=Environment.PRODUCTION, environ=env()
+        ).venues.forex
+        assert practice is not None
+        assert live is not None
+        assert practice.api_host == "demo.ctraderapi.com"
+        assert live.api_host == "live.ctraderapi.com"
+
+    def test_the_protobuf_port_is_configured(self) -> None:
+        # 5035 is protobuf only; 5036 is the JSON port, which this client does not speak.
+        forex = load_settings(
+            config_dir=REPO_CONFIG_DIR,
+            environment=Environment.STAGING,
+            environ=env(**FOREX_CREDENTIALS),
+        ).venues.forex
+        assert forex is not None
+        assert forex.api_port == 5035
 
 
 class TestLiveTradingSafety:
@@ -308,10 +391,7 @@ class TestLiveTradingSafety:
         with pytest.raises(ConfigurationError, match="allow_live_trading"):
             load(
                 config_dir,
-                env(
-                    TRADINGSYS_VENUES__FOREX__ACCOUNT_ID="acct",
-                    TRADINGSYS_VENUES__FOREX__API_TOKEN="token",
-                ),
+                env(**FOREX_CREDENTIALS),
                 environment=Environment.PRODUCTION,
             )
 
@@ -320,20 +400,14 @@ class TestLiveTradingSafety:
         with pytest.raises(ConfigurationError, match="only permitted in the production"):
             load(
                 config_dir,
-                env(
-                    TRADINGSYS_VENUES__FOREX__ACCOUNT_ID="acct",
-                    TRADINGSYS_VENUES__FOREX__API_TOKEN="token",
-                ),
+                env(**FOREX_CREDENTIALS),
             )
 
     def test_an_armed_live_venue_in_production_is_accepted(self, config_dir: Path) -> None:
         self._live_config(config_dir, allow=True, environment="production")
         settings = load(
             config_dir,
-            env(
-                TRADINGSYS_VENUES__FOREX__ACCOUNT_ID="acct",
-                TRADINGSYS_VENUES__FOREX__API_TOKEN="token",
-            ),
+            env(**FOREX_CREDENTIALS),
             environment=Environment.PRODUCTION,
         )
         assert settings.venues.live_venue_names() == ("venues.forex",)
@@ -342,13 +416,13 @@ class TestLiveTradingSafety:
         (config_dir / "base.toml").write_text(
             MINIMAL_BASE
             + """
-[venues.crypto.binance]
+[venues.crypto.bybit]
 enabled = true
-exchange_id = "binance"
+exchange_id = "bybit"
 sandbox = false
 """
         )
-        with pytest.raises(ConfigurationError, match=r"venues\.crypto\.binance"):
+        with pytest.raises(ConfigurationError, match=r"venues\.crypto\.bybit"):
             load(config_dir)
 
     def test_a_practice_venue_needs_no_arming(self, config_dir: Path) -> None:
@@ -357,10 +431,7 @@ sandbox = false
         )
         settings = load(
             config_dir,
-            env(
-                TRADINGSYS_VENUES__FOREX__ACCOUNT_ID="acct",
-                TRADINGSYS_VENUES__FOREX__API_TOKEN="token",
-            ),
+            env(**FOREX_CREDENTIALS),
         )
         assert settings.venues.live_venue_names() == ()
 
@@ -388,11 +459,20 @@ class TestRedaction:
                 TRADINGSYS_DATABASE__PASSWORD="db-secret",
                 TRADINGSYS_REDIS__PASSWORD="redis-secret",
                 TRADINGSYS_VENUES__FOREX__ACCOUNT_ID="acct",
-                TRADINGSYS_VENUES__FOREX__API_TOKEN="venue-secret",
+                TRADINGSYS_VENUES__FOREX__CLIENT_ID="client-secret-value",
+                TRADINGSYS_VENUES__FOREX__CLIENT_SECRET="venue-secret",
+                TRADINGSYS_VENUES__FOREX__ACCESS_TOKEN="access-secret",
+                TRADINGSYS_VENUES__FOREX__REFRESH_TOKEN="refresh-secret",
             ),
         )
         rendered = repr(settings.describe())
-        for secret in ("db-secret", "redis-secret", "venue-secret"):
+        for secret in (
+            "db-secret",
+            "redis-secret",
+            "venue-secret",
+            "access-secret",
+            "refresh-secret",
+        ):
             assert secret not in rendered
 
     def test_the_settings_repr_never_leaks_a_secret(self, config_dir: Path) -> None:
@@ -418,17 +498,21 @@ class TestShippedConfiguration:
         settings = load_settings(
             config_dir=REPO_CONFIG_DIR,
             environment=environment,
-            environ=env(
-                TRADINGSYS_VENUES__FOREX__ACCOUNT_ID="acct",
-                TRADINGSYS_VENUES__FOREX__API_TOKEN="token",
-            ),
+            environ=env(**FOREX_CREDENTIALS),
         )
         assert settings.app.environment is environment
 
     def test_no_shipped_file_contains_a_secret(self) -> None:
         for path in sorted(REPO_CONFIG_DIR.glob("*.toml")):
             contents = path.read_text()
-            for forbidden in ("password", "api_token", "api_secret", "api_key"):
+            for forbidden in (
+                "password",
+                "client_secret",
+                "access_token",
+                "refresh_token",
+                "api_secret",
+                "api_key",
+            ):
                 assert f"{forbidden} =" not in contents, f"{path} sets {forbidden}"
 
     def test_shipped_production_does_not_arm_live_trading(self) -> None:
@@ -449,14 +533,11 @@ class TestShippedConfiguration:
         settings = load_settings(
             config_dir=REPO_CONFIG_DIR,
             environment=Environment.STAGING,
-            environ=env(
-                TRADINGSYS_VENUES__FOREX__ACCOUNT_ID="acct",
-                TRADINGSYS_VENUES__FOREX__API_TOKEN="token",
-            ),
+            environ=env(**FOREX_CREDENTIALS),
         )
         assert settings.venues.forex is not None
         assert settings.venues.forex.environment is VenueEnvironment.PRACTICE
-        assert settings.venues.crypto["binance"].sandbox is True
+        assert settings.venues.crypto["bybit"].sandbox is True
 
 
 def _forex_section(*, enabled: bool, venue_environment: str = "practice") -> str:
@@ -464,11 +545,24 @@ def _forex_section(*, enabled: bool, venue_environment: str = "practice") -> str
 [venues.forex]
 enabled = {str(enabled).lower()}
 environment = "{venue_environment}"
-rest_url = "https://api.example.com"
-stream_url = "https://stream.example.com"
+demo_api_host = "demo.example.com"
+live_api_host = "live.example.com"
+api_port = 5035
+token_url = "https://openapi.example.com/apps/token"
 request_timeout_seconds = 10.0
 stream_read_timeout_seconds = 20.0
 max_retries = 3
 retry_backoff_seconds = 0.5
 max_requests_per_second = 30.0
+token_refresh_margin_seconds = 259200.0
 """
+
+
+# The five variables an enabled forex venue needs, as the environment supplies them.
+FOREX_CREDENTIALS = {
+    "TRADINGSYS_VENUES__FOREX__ACCOUNT_ID": "5325402",
+    "TRADINGSYS_VENUES__FOREX__CLIENT_ID": "client-id",
+    "TRADINGSYS_VENUES__FOREX__CLIENT_SECRET": "client-secret",
+    "TRADINGSYS_VENUES__FOREX__ACCESS_TOKEN": "access-token",
+    "TRADINGSYS_VENUES__FOREX__REFRESH_TOKEN": "refresh-token",
+}

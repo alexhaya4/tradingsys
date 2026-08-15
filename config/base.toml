@@ -46,22 +46,43 @@ metrics_path = "/metrics"
 readiness_timeout_seconds = 3.0
 
 [venues.forex]
-# account_id and api_token are deliberately absent: the account is deployment
-# specific and the token is a secret. Both come from the environment, and enabling
-# the venue without them fails at startup.
+# cTrader Open API, reached through Pepperstone. See PROGRESS.md for why this is
+# cTrader rather than OANDA.
+#
+# account_id and the four OAuth values are deliberately absent here. The account is
+# deployment specific and the credentials are secrets, so all five come from the
+# environment; enabling the venue without them fails at startup.
+#
+# The trading connection is a persistent TLS socket carrying protobuf, not HTTP, which
+# is why this is a host and a port rather than a URL. token_url is the separate HTTPS
+# endpoint used to exchange a refresh token for a new access token, confirmed against
+# help.ctrader.com/open-api/account-authentication.
+#
+# Both hostnames are listed and the code selects between them by `environment`. There
+# is deliberately no single `api_host` field: the two environments are fully separated
+# at the venue, a live endpoint cannot serve demo accounts or the reverse, so a
+# deployment must not be able to express the mismatch.
+#
+# Port 5035 carries protobuf and nothing else; 5036 is the JSON port and this client
+# does not speak it. The connection is always TLS.
 enabled = false
 environment = "practice"
-rest_url = "https://api-fxpractice.oanda.com"
-stream_url = "https://stream-fxpractice.oanda.com"
+demo_api_host = "demo.ctraderapi.com"
+live_api_host = "live.ctraderapi.com"
+api_port = 5035
+token_url = "https://openapi.ctrader.com/apps/token"
 request_timeout_seconds = 10.0
 stream_read_timeout_seconds = 20.0
 max_retries = 3
 retry_backoff_seconds = 0.5
 max_requests_per_second = 30.0
+# Access tokens last about 30 days. Refreshing three days out leaves room for several
+# retries before the token actually dies, and a dead token needs manual reauthorisation.
+token_refresh_margin_seconds = 259200.0
 
-[venues.crypto.binance]
+[venues.crypto.bybit]
 enabled = false
-exchange_id = "binance"
+exchange_id = "bybit"
 sandbox = true
 request_timeout_seconds = 10.0
 max_requests_per_second = 10.0

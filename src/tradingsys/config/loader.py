@@ -11,7 +11,7 @@ environment is worse than one that does not start.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
@@ -28,7 +28,7 @@ from tradingsys.core.errors import ConfigurationError
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ["format_validation_error", "load_settings"]
+__all__ = ["format_validation_error", "load_settings", "missing_variables"]
 
 
 def load_settings(
@@ -87,13 +87,40 @@ def format_validation_error(error: ValidationError, context: SettingsContext) ->
     ]
     for detail in error.errors():
         path = ".".join(str(part) for part in detail["loc"])
-        message = detail["msg"]
-        lines.append(f"  {path}: {message} [set with {env_var_for(path)}]")
+        lines.append(f"  {path}: {detail['msg']} {_hint_for(detail, path)}")
     lines.append(
         "Non-secret values belong in the TOML files; credentials belong in environment "
         "variables or the secrets directory."
     )
     return "\n".join(lines)
+
+
+def _hint_for(detail: Mapping[str, Any], dotted_path: str) -> str:
+    """The remedy for one validation error.
+
+    Telling an operator to set a variable that is already set, which is what a single
+    generic hint does when the real problem is an unrecognised name, sends them looking
+    for the wrong thing. The advice follows the error type.
+    """
+    if detail.get("type") == "extra_forbidden":
+        return (
+            f"[unrecognised setting: either remove {env_var_for(dotted_path)} from the "
+            f"environment, or add the field to the configuration model]"
+        )
+    return f"[set with {env_var_for(dotted_path)}]"
+
+
+def missing_variables(error: ValidationError) -> tuple[str, ...]:
+    """Environment variables for the fields that are required and absent.
+
+    Distinguished from fields that are present but unrecognised, which need the
+    opposite remedy.
+    """
+    return tuple(
+        env_var_for(".".join(str(part) for part in detail["loc"]))
+        for detail in error.errors()
+        if detail.get("type") == "missing"
+    )
 
 
 def env_var_for(dotted_path: str) -> str:

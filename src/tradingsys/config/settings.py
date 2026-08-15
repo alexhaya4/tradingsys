@@ -44,6 +44,7 @@ __all__ = [
     "ForexVenueSettings",
     "LogFormat",
     "LogLevel",
+    "OAuthCredentials",
     "ObservabilitySettings",
     "RedisSettings",
     "Settings",
@@ -217,72 +218,199 @@ class ObservabilitySettings(_Section):
 
 
 @final
-class ForexVenueSettings(_Section):
-    """Connection settings for a forex broker exposing REST and streaming endpoints.
+class OAuthCredentials(BaseModel):
+    """An OAuth2 credential set whose access token expires and must be refreshed.
 
-    Endpoint URLs are configuration rather than constants because the practice and
-    live environments differ only by hostname, and pinning them in code would make
-    the distinction invisible in review.
+    Assembled by :meth:`ForexVenueSettings.require_credentials` from four separately
+    supplied environment variables rather than parsed as a nested config section: the
+    four are kept flat so that a validation failure can name exactly which one is
+    missing, which "credentials is required" cannot.
+
+    This is the shape cTrader Open API uses, and it is a different animal from a static
+    API key. Two properties of it drive the design:
+
+    *The access token expires*, typically after about thirty days, so a process that
+    reads its credentials only at startup authenticates perfectly for a month and then
+    fails. Expiry is therefore something the venue interface exposes and a supervisor
+    acts on, not an implementation detail buried in an adapter.
+
+    *Refreshing can rotate the refresh token itself.* When it does, the new one must be
+    persisted before the process next restarts, or the account is locked out until
+    someone re-authorises by hand. The refresh call returns the new material rather
+    than swallowing it, so the caller is forced to decide where it goes.
+
+    All four values are secrets. ``client_id`` counts as one here even though it is
+    sometimes treated as public, because together with the secret it mints tokens.
+    """
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    client_id: SecretStr
+    client_secret: SecretStr
+    access_token: SecretStr
+    refresh_token: SecretStr
+
+
+@final
+class ForexVenueSettings(_Section):
+    """Connection settings for the forex venue.
+
+    Currently cTrader Open API, reached through a broker. The credential shape and the
+    endpoints below are that venue's; the abstractions in :mod:`tradingsys.venues` are
+    not, and must stay that way. Configuration is the correct place for a venue to be
+    named, because a deployment connects to one specific venue, whereas the interfaces
+    have to accommodate all of them.
+
+    Endpoints are configuration rather than constants because demo and live differ only
+    by hostname, and pinning them in code would make that distinction invisible in
+    review.
+
+    The trading connection is a persistent TLS socket rather than an HTTP endpoint,
+    which is why it is a host and port rather than a URL. ``token_url`` is separate and
+    is HTTPS, because OAuth token exchange is an ordinary HTTP call.
     """
 
     enabled: bool
     environment: VenueEnvironment
-    rest_url: NonEmptyStr
-    stream_url: NonEmptyStr
+    demo_api_host: NonEmptyStr
+    live_api_host: NonEmptyStr
+    api_port: Port
+    token_url: NonEmptyStr
     request_timeout_seconds: PositiveSeconds
     stream_read_timeout_seconds: PositiveSeconds
     max_retries: Annotated[int, Field(ge=0)]
     retry_backoff_seconds: PositiveSeconds
     max_requests_per_second: Annotated[float, Field(gt=0)]
+    token_refresh_margin_seconds: PositiveSeconds
+    """How long before expiry a refresh is attempted.
+
+    Refreshing exactly at expiry means any transient failure at that moment locks the
+    account out until someone re-authorises by hand. The margin buys retries, and is
+    configuration because it trades refresh traffic against that risk.
+    """
     account_id: NonEmptyStr | None = None
-    """Deployment specific, so it has no default and is supplied per environment.
+    """The trading account number. Deployment specific but not a secret, so it may
+    appear in a per-environment config file as well as in the environment.
 
     Optional only so that the venue can be described while disabled; enabling it
     without an account is rejected below.
     """
-    api_token: SecretStr | None = None
+    client_id: SecretStr | None = None
+    client_secret: SecretStr | None = None
+    access_token: SecretStr | None = None
+    refresh_token: SecretStr | None = None
 
     @model_validator(mode="after")
-    def _check_urls(self) -> Self:
-        for name, value in (("rest_url", self.rest_url), ("stream_url", self.stream_url)):
-            if not value.startswith("https://"):
-                raise ValueError(
-                    f"{name} must be an https URL; credentials must never cross the "
-                    f"network in clear text, got {value!r}"
-                )
+    def _check_token_url(self) -> Self:
+        if not self.token_url.startswith("https://"):
+            raise ValueError(
+                f"token_url must be an https URL; a client secret must never cross the "
+                f"network in clear text, got {self.token_url!r}"
+            )
         return self
 
     @model_validator(mode="after")
-    def _check_credentials_when_enabled(self) -> Self:
-        if not self.enabled:
-            return self
-        missing = [
-            name
-            for name, value in (("account_id", self.account_id), ("api_token", self.api_token))
-            if value is None
-        ]
-        if missing:
+    def _check_the_two_hosts_differ(self) -> Self:
+        """The demo and live hosts must not be the same string.
+
+        If they were, :attr:`api_host` would return the same endpoint for both
+        environments and the separation below would be decorative.
+        """
+        if self.demo_api_host == self.live_api_host:
             raise ValueError(
-                f"the forex venue is enabled but {', '.join(missing)} "
-                f"{'is' if len(missing) == 1 else 'are'} not set. Supply the account id and "
-                f"token through the environment, never through a config file."
+                f"demo_api_host and live_api_host are both {self.demo_api_host!r}. The two "
+                f"environments are fully separated at the venue: one cannot serve the "
+                f"other's accounts, so they cannot share a hostname."
             )
         return self
 
     @property
-    def credentials(self) -> tuple[str, SecretStr]:
-        """Account id and token, for the adapter that connects to the venue.
+    def api_host(self) -> str:
+        """The endpoint for the configured environment.
+
+        Derived rather than configured. Both hostnames are held in configuration so
+        they stay reviewable and correctable, but which one is used is a function of
+        :attr:`environment`, so a deployment cannot point a demo account at the live
+        endpoint or the reverse: there is no field in which to express the mismatch.
+
+        The venue enforces the same separation from its side, a live endpoint refuses
+        demo accounts and vice versa, so the only thing a mismatch could produce is a
+        confusing authentication failure. Making it unrepresentable is cheaper than
+        diagnosing it.
+        """
+        if self.environment is VenueEnvironment.LIVE:
+            return self.live_api_host
+        return self.demo_api_host
+
+    @model_validator(mode="after")
+    def _check_credentials_when_enabled(self) -> Self:
+        """An enabled venue must be able to authenticate.
+
+        Every absent field is named, because supplying four separate variables one at a
+        time and being told only "credentials are required" each time is a miserable
+        way to spend an afternoon.
+        """
+        if not self.enabled:
+            return self
+        missing = [
+            name
+            for name, value in (
+                ("account_id", self.account_id),
+                ("client_id", self.client_id),
+                ("client_secret", self.client_secret),
+                ("access_token", self.access_token),
+                ("refresh_token", self.refresh_token),
+            )
+            if value is None
+        ]
+        if missing:
+            listed = ", ".join(missing)
+            variables = ", ".join(
+                f"{ENV_PREFIX}VENUES{ENV_NESTED_DELIMITER}FOREX{ENV_NESTED_DELIMITER}{name.upper()}"
+                for name in missing
+            )
+            raise ValueError(
+                f"the forex venue is enabled but {listed} "
+                f"{'is' if len(missing) == 1 else 'are'} not set. Supply them through the "
+                f"environment ({variables}), never through a config file."
+            )
+        return self
+
+    @property
+    def has_credentials(self) -> bool:
+        """Whether the venue can authenticate."""
+        return None not in (
+            self.account_id,
+            self.client_id,
+            self.client_secret,
+            self.access_token,
+            self.refresh_token,
+        )
+
+    def require_credentials(self) -> tuple[str, OAuthCredentials]:
+        """Account id and credential set, for the adapter that connects to the venue.
 
         Raises:
             ValueError: The venue is not fully configured. Enabled venues are checked
                 at startup, so this can only fire for a disabled one.
         """
-        if self.account_id is None or self.api_token is None:
+        if (
+            self.account_id is None
+            or self.client_id is None
+            or self.client_secret is None
+            or self.access_token is None
+            or self.refresh_token is None
+        ):
             raise ValueError(
                 "forex venue credentials were requested but the venue is not fully "
                 "configured; check `enabled` before connecting"
             )
-        return self.account_id, self.api_token
+        return self.account_id, OAuthCredentials(
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            access_token=self.access_token,
+            refresh_token=self.refresh_token,
+        )
 
 
 @final
@@ -429,10 +557,19 @@ class Settings(BaseSettings):
         settings_cls: type[BaseSettings],
         init_settings: PydanticBaseSettingsSource,
         env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,  # noqa: ARG003 - secrets never come from .env
+        dotenv_settings: PydanticBaseSettingsSource,  # noqa: ARG003 - never used, see below
         file_secret_settings: PydanticBaseSettingsSource,  # noqa: ARG003 - replaced below
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """Order the layers: explicit arguments, environment, secret files, then TOML.
+
+        ``dotenv_settings`` is dropped, permanently and in every environment. The rule
+        is that this application reads secrets only from the environment or from the
+        secrets directory, never from a file it parses, and that rule is worth having
+        precisely because it has no exceptions. Enabling a dotenv source in development
+        and test while refusing it in staging and production would make the guarantee
+        conditional on the environment selector being correct, which adds a failure
+        mode on the day it matters most. The cost of keeping the invariant absolute is
+        one documented shell line, and ``scripts/verify.sh`` pays it for you.
 
         The stock secrets source is replaced because it only maps top level field
         names, which cannot express a nested secret such as ``database.password``.
@@ -532,8 +669,10 @@ class Settings(BaseSettings):
                     else {
                         "enabled": self.venues.forex.enabled,
                         "environment": self.venues.forex.environment.value,
-                        "rest_url": self.venues.forex.rest_url,
-                        "stream_url": self.venues.forex.stream_url,
+                        "endpoint": (f"{self.venues.forex.api_host}:{self.venues.forex.api_port}"),
+                        "token_url": self.venues.forex.token_url,
+                        "account_id": self.venues.forex.account_id,
+                        "has_credentials": self.venues.forex.has_credentials,
                     }
                 ),
                 "crypto": {

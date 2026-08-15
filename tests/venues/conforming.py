@@ -14,8 +14,12 @@ here invents market behaviour.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING, final
 
+from pydantic import SecretStr
+
+from tradingsys.core.clock import utc_now
 from tradingsys.venues.base import ExecutionVenue, MarketDataSource
 from tradingsys.venues.errors import (
     InstrumentNotFoundError,
@@ -23,6 +27,7 @@ from tradingsys.venues.errors import (
     PositionNotFoundError,
     UnsupportedVenueOperationError,
 )
+from tradingsys.venues.models import CredentialRefresh
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Sequence
@@ -51,11 +56,18 @@ if TYPE_CHECKING:
 class _Connection:
     """Shared lifecycle bookkeeping for the two doubles below."""
 
-    def __init__(self, venue: str, capabilities: VenueCapabilities) -> None:
+    def __init__(
+        self,
+        venue: str,
+        capabilities: VenueCapabilities,
+        expires_at: datetime | None = None,
+    ) -> None:
         self._venue = venue
         self._capabilities = capabilities
+        self._expires_at = expires_at
         self.connect_calls = 0
         self.close_calls = 0
+        self.refresh_calls = 0
 
     @property
     def venue(self) -> str:
@@ -74,6 +86,25 @@ class _Connection:
     async def ping(self) -> float:
         return 0.0
 
+    @property
+    def credentials_expire_at(self) -> datetime | None:
+        return self._expires_at
+
+    async def refresh_credentials(self) -> CredentialRefresh:
+        if not self._capabilities.credentials_expire:
+            raise UnsupportedVenueOperationError(
+                self.venue, "these credentials do not expire, so there is nothing to refresh"
+            )
+        self.refresh_calls += 1
+        now = utc_now()
+        self._expires_at = now + timedelta(days=30)
+        return CredentialRefresh(
+            refreshed_at=now,
+            expires_at=self._expires_at,
+            access_token=SecretStr(f"access-{self.refresh_calls}"),
+            refresh_token=SecretStr(f"refresh-{self.refresh_calls}"),
+        )
+
 
 @final
 class ConformingMarketData(_Connection, MarketDataSource):
@@ -88,8 +119,9 @@ class ConformingMarketData(_Connection, MarketDataSource):
         quotes: Sequence[Quote] = (),
         candles: Sequence[Candle] = (),
         server_now: datetime | None = None,
+        expires_at: datetime | None = None,
     ) -> None:
-        super().__init__(venue, capabilities)
+        super().__init__(venue, capabilities, expires_at)
         self._instruments = tuple(instruments)
         self._quotes = tuple(quotes)
         self._candles = tuple(candles)
@@ -187,8 +219,9 @@ class ConformingExecution(_Connection, ExecutionVenue):
         *,
         account: AccountSnapshot | None = None,
         positions: Sequence[Position] = (),
+        expires_at: datetime | None = None,
     ) -> None:
-        super().__init__(venue, capabilities)
+        super().__init__(venue, capabilities, expires_at)
         self._account = account
         self._positions = tuple(positions)
         self.submitted: list[OrderRequest] = []

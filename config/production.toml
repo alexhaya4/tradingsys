@@ -20,11 +20,13 @@ command_timeout_seconds = 15.0
 ssl_mode = "require"
 
 [venues.forex]
+# Selecting the live endpoint is what `environment = "live"` means; the hostname comes
+# from base.toml and is chosen by that setting rather than restated here. Enabling this
+# also requires app.allow_live_trading, which stays false: arming real orders is a
+# reviewable change, not a deploy.
 enabled = false
 environment = "live"
-rest_url = "https://api-fxtrade.oanda.com"
-stream_url = "https://stream-fxtrade.oanda.com"
 
-[venues.crypto.binance]
+[venues.crypto.bybit]
 enabled = false
 sandbox = false

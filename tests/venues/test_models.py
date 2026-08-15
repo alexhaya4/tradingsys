@@ -220,13 +220,20 @@ class TestCandle:
         )
         assert flat.range == 0
 
-    def test_negative_volume_is_rejected(self) -> None:
-        with pytest.raises(DomainError, match="volume"):
-            candle(volume=Decimal(-1))
+    def test_negative_traded_volume_is_rejected(self) -> None:
+        with pytest.raises(DomainError, match="traded_volume"):
+            candle(traded_volume=Decimal(-1))
 
-    def test_negative_trade_count_is_rejected(self) -> None:
-        with pytest.raises(DomainError, match="trade_count"):
-            candle(trade_count=-1)
+    def test_negative_tick_count_is_rejected(self) -> None:
+        with pytest.raises(DomainError, match="tick_count"):
+            candle(tick_count=-1)
+
+    def test_both_volume_figures_default_to_absent(self) -> None:
+        # Absent rather than zero: a forex bar has no traded volume, and zero would
+        # average into a real number as though it were one.
+        bar = candle()
+        assert bar.tick_count is None
+        assert bar.traded_volume is None
 
     def test_incomplete_bars_are_flagged(self) -> None:
         assert candle(complete=False).complete is False
@@ -363,9 +370,20 @@ class TestOrderRequest:
             request().validate_against(btcusdt())
 
     def test_a_valid_request_passes_instrument_validation(self) -> None:
-        request(order_type=OrderType.LIMIT, limit_price=Decimal("1.08501")).validate_against(
-            eurusd()
+        # The negative control for the rejection tests above: an on-grid quantity and
+        # an on-grid price at every price field are accepted.
+        valid = request(
+            order_type=OrderType.LIMIT,
+            limit_price=Decimal("1.08501"),
+            take_profit_price=Decimal("1.09000"),
+            stop_loss_price=Decimal("1.08000"),
         )
+        valid.validate_against(eurusd())
+        instrument = eurusd()
+        assert instrument.is_valid_quantity(valid.quantity)
+        for price in (valid.limit_price, valid.take_profit_price, valid.stop_loss_price):
+            assert price is not None
+            assert instrument.validate_price(price) == price
 
 
 def order(**overrides: object) -> Order:

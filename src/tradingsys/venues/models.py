@@ -15,6 +15,8 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Self, final
 
+from pydantic import SecretStr
+
 from tradingsys.core.clock import ensure_utc
 from tradingsys.core.errors import DomainError
 from tradingsys.core.money import Money
@@ -40,6 +42,7 @@ __all__ = [
     "AccountSnapshot",
     "BookLevel",
     "Candle",
+    "CredentialRefresh",
     "ExecutionEvent",
     "Fill",
     "FundingRate",
@@ -229,8 +232,13 @@ class Candle:
     high: Decimal
     low: Decimal
     close: Decimal
-    volume: Decimal = Decimal(0)
-    trade_count: int = 0
+    tick_count: int | None = None
+    """Number of ticks in the bar. cTrader reports this and calls it volume. ``None``
+    where the venue does not report it."""
+    traded_volume: Decimal | None = None
+    """Base asset volume actually traded. Crypto venues report this; forex has no such
+    figure, so it is ``None`` there rather than zero. Zero would be a lie that averages
+    into a real number."""
     complete: bool = True
     """False for the bar currently forming. Incomplete bars must never be stored as
     final or used to trigger a decision that assumes a closed bar."""
@@ -242,12 +250,13 @@ class Candle:
             if value <= 0:
                 raise DomainError(f"{self.instrument_id}: candle {name} must be positive")
             object.__setattr__(self, name, value)
-        volume = to_decimal(self.volume, what="volume")
-        if volume < 0:
-            raise DomainError(f"{self.instrument_id}: candle volume must not be negative")
-        object.__setattr__(self, "volume", volume)
-        if self.trade_count < 0:
-            raise DomainError(f"{self.instrument_id}: trade_count must not be negative")
+        if self.traded_volume is not None:
+            volume = to_decimal(self.traded_volume, what="traded_volume")
+            if volume < 0:
+                raise DomainError(f"{self.instrument_id}: traded_volume must not be negative")
+            object.__setattr__(self, "traded_volume", volume)
+        if self.tick_count is not None and self.tick_count < 0:
+            raise DomainError(f"{self.instrument_id}: tick_count must not be negative")
         if self.high < max(self.open, self.close) or self.high < self.low:
             raise DomainError(
                 f"{self.instrument_id} at {self.start}: high {self.high} is below another "
@@ -748,6 +757,61 @@ class ExecutionEvent:
 
 @final
 @dataclass(frozen=True, slots=True)
+class CredentialRefresh:
+    """The outcome of renewing a venue credential that expires.
+
+    Returned rather than absorbed. Some venues rotate the refresh credential when it is
+    used, and the replacement has to reach durable storage before the process next
+    restarts, or the account is locked out until a human reauthorises it. Handing the
+    new material back forces the caller to decide where it goes; an adapter that
+    updated itself in memory and said nothing would work perfectly until the first
+    restart after a rotation.
+
+    Attributes:
+        refreshed_at: When the renewal completed.
+        expires_at: When the new access credential stops working, or ``None`` if the
+            venue does not say.
+        access_token: The new access credential.
+        refresh_token: The new refresh credential when the venue rotated it, otherwise
+            ``None``, meaning the existing one remains valid.
+    """
+
+    refreshed_at: datetime
+    expires_at: datetime | None
+    access_token: SecretStr
+    refresh_token: SecretStr | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "refreshed_at", ensure_utc(self.refreshed_at, what="refreshed_at"))
+        if self.expires_at is not None:
+            object.__setattr__(self, "expires_at", ensure_utc(self.expires_at, what="expires_at"))
+            if self.expires_at <= self.refreshed_at:
+                raise DomainError(
+                    f"a refreshed credential expires at {self.expires_at}, which is not after "
+                    f"the refresh at {self.refreshed_at}; the venue returned a dead token"
+                )
+        if not self.access_token.get_secret_value():
+            raise DomainError("a refreshed credential must carry a non-empty access token")
+
+    @property
+    def rotated(self) -> bool:
+        """Whether the refresh credential changed and must be persisted."""
+        return self.refresh_token is not None
+
+    def is_due(self, now: datetime, margin: timedelta) -> bool:
+        """Whether this credential should be renewed again by ``now``.
+
+        Credentials that never expire are never due. Renewal is deliberately early by
+        ``margin``: attempting it exactly at expiry leaves no room for a retry, and a
+        failed renewal of an expired credential cannot be recovered without a human.
+        """
+        if self.expires_at is None:
+            return False
+        return ensure_utc(now, what="now") >= self.expires_at - margin
+
+
+@final
+@dataclass(frozen=True, slots=True)
 class VenueCapabilities:
     """What a venue actually supports.
 
@@ -775,6 +839,12 @@ class VenueCapabilities:
     than as separate orders after the fill."""
     supports_partial_fills: bool = True
     supports_order_modification: bool = False
+    credentials_expire: bool = False
+    """Whether this venue's credentials expire and must be renewed while running.
+
+    True for OAuth style venues such as cTrader, false for a static key and secret.
+    Supervision code asks this rather than knowing which venues are which.
+    """
     tags: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:

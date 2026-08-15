@@ -4,13 +4,21 @@ Two abstract base classes divide the work by trust boundary rather than by proto
 :class:`MarketDataSource` reads, :class:`ExecutionVenue` writes. A read-only research
 process depends only on the former and cannot place an order even by mistake.
 
-**This module declares signatures only.** No adapter lives here. The shapes were drawn
-against real OANDA v20 semantics, which is the reference for the forex side: practice
-and live differing only by hostname, REST for history and a long-lived HTTP stream for
-prices, numerics arriving as strings and parsed to Decimal, and sizing in units rather
-than lots. None of that venue's field names, identifier formats, or enum values appear
-here, so a cTrader Open API or ccxt adapter can be added without touching these
-classes.
+**This module declares signatures only.** No adapter lives here.
+
+These shapes were first drawn against OANDA v20 and then, before any adapter existed,
+the forex venue changed to cTrader Open API. Nothing in this module had to change to
+accommodate that, which is the whole return on writing it this way: the two venues
+disagree about transport (HTTP streaming against a persistent protobuf socket),
+authentication (a static bearer token against OAuth2 with expiring, rotating tokens),
+sizing (units against lots with a contract size), and position model (netting against
+hedging), and every one of those disagreements is expressed as data rather than as a
+branch on a venue name. The single addition the change did prompt is credential expiry
+and refresh below, which is a real property of some venues and not a cTrader detail.
+
+No venue's field names, identifier formats, or enum values appear here. An adapter for
+either venue, or for a ccxt exchange, is written against these classes without
+modifying them.
 
 Conventions every implementation must honour:
 
@@ -44,6 +52,7 @@ if TYPE_CHECKING:
     from tradingsys.venues.models import (
         AccountSnapshot,
         Candle,
+        CredentialRefresh,
         ExecutionEvent,
         Fill,
         FundingRate,
@@ -108,6 +117,49 @@ class VenueConnection(ABC):
 
         Raises:
             VenueConnectivityError: The venue did not respond.
+        """
+        raise NotImplementedError
+
+    # ------------------------------------------------------------------
+    # credentials
+    # ------------------------------------------------------------------
+
+    @property
+    @abstractmethod
+    def credentials_expire_at(self) -> datetime | None:
+        """When the current credential stops working, or ``None`` if it does not expire.
+
+        A static key and secret returns ``None`` forever. An OAuth style venue returns
+        the access token's expiry, which for cTrader is roughly thirty days out. A
+        supervisor polls this rather than tracking venue-specific token lifetimes, and
+        :attr:`~tradingsys.venues.models.VenueCapabilities.credentials_expire` says in
+        advance whether it is worth polling at all.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def refresh_credentials(self) -> CredentialRefresh:
+        """Renew the credential and return the new material.
+
+        Implementations must not quietly keep the result to themselves. Where the venue
+        rotates the refresh credential, the caller has to persist the replacement before
+        the process restarts, and only the caller knows where its secrets live. An
+        adapter that refreshed itself in memory would work until the first restart after
+        a rotation and then fail authentication with no obvious cause.
+
+        Must be safe to call before expiry: this is how a supervisor renews early, and
+        renewing early is the point, because a renewal that fails after expiry cannot be
+        retried without a human reauthorising the application.
+
+        Raises:
+            UnsupportedVenueOperationError: The venue's credentials do not expire, so
+                there is nothing to refresh. Check
+                :attr:`~tradingsys.venues.models.VenueCapabilities.credentials_expire`
+                first.
+            VenueAuthenticationError: The venue refused the refresh. The credential is
+                now unrecoverable without manual reauthorisation, so this must page
+                someone rather than be retried indefinitely.
+            VenueConnectivityError: The venue could not be reached. Retryable.
         """
         raise NotImplementedError
 

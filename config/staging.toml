@@ -16,11 +16,11 @@ max_pool_size = 10
 ssl_mode = "require"
 
 [venues.forex]
+# Staging runs against the cTrader demo endpoint, which is what base.toml already
+# points at; only `enabled` differs.
 enabled = true
 environment = "practice"
-rest_url = "https://api-fxpractice.oanda.com"
-stream_url = "https://stream-fxpractice.oanda.com"
 
-[venues.crypto.binance]
+[venues.crypto.bybit]
 enabled = true
 sandbox = true
