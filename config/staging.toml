@@ -1,0 +1,26 @@
+# Staging overrides, layered on top of base.toml.
+#
+# Staging runs the production code path against the venues' practice environments, so
+# the only differences from production are the venue hostnames and the pool sizing.
+
+[app]
+environment = "staging"
+
+[observability]
+log_level = "info"
+log_format = "json"
+
+[database]
+min_pool_size = 2
+max_pool_size = 10
+ssl_mode = "require"
+
+[venues.forex]
+enabled = true
+environment = "practice"
+rest_url = "https://api-fxpractice.oanda.com"
+stream_url = "https://stream-fxpractice.oanda.com"
+
+[venues.crypto.binance]
+enabled = true
+sandbox = true

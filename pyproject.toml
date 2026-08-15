@@ -1,0 +1,125 @@
+[project]
+name = "tradingsys"
+version = "0.1.0"
+description = "Foundation for an automated multi-venue trading system (forex and crypto)."
+requires-python = ">=3.12,<3.13"
+readme = "README.md"
+license = { text = "Proprietary" }
+dependencies = [
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "structlog>=24.4",
+    "asyncpg>=0.30",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "alembic>=1.14",
+    "prometheus-client>=0.21",
+    "starlette>=0.41",
+    "uvicorn[standard]>=0.32",
+    "redis>=5.2",
+    "tzdata>=2024.2",
+]
+
+[project.scripts]
+tradingsys = "tradingsys.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "httpx>=0.28",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "hypothesis>=6.165.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tradingsys"]
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "F",     # pyflakes
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "I",     # isort
+    "N",     # pep8-naming
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "A",     # flake8-builtins
+    "C4",    # flake8-comprehensions
+    "DTZ",   # flake8-datetimez
+    "T20",   # flake8-print
+    "PT",    # flake8-pytest-style
+    "RET",   # flake8-return
+    "SIM",   # flake8-simplify
+    "TID",   # flake8-tidy-imports
+    "ARG",   # flake8-unused-arguments
+    "PTH",   # flake8-use-pathlib
+    "ERA",   # eradicate commented-out code
+    "PL",    # pylint
+    "TRY",   # tryceratops
+    "RUF",   # ruff-specific
+]
+ignore = [
+    "TRY003",  # long messages outside exception class: we want actionable messages
+    "PLR0913", # argument count: venue interfaces legitimately take many parameters
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLR2004"]
+"migrations/*" = ["ERA001"]
+# Implementing an interface means accepting every declared parameter, used or not.
+"tests/venues/conforming.py" = ["ARG002"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+warn_no_return = true
+show_error_codes = true
+files = ["src", "tests"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["asyncpg.*", "alembic.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+# Integration tests are excluded by default so that `pytest` needs no running services.
+# Select them explicitly with `-m integration`, which overrides this.
+addopts = "-ra --strict-markers --strict-config -m 'not integration'"
+markers = [
+    "integration: requires live PostgreSQL/TimescaleDB and Redis (see docker-compose.yml)",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src/tradingsys"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]

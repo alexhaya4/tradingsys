@@ -1,0 +1,24 @@
+# Keep the build context small and keep secrets out of the image.
+.env
+.env.*
+!.env.example
+secrets/
+
+.venv/
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+
+.git/
+.github/
+tests/
+deploy/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml

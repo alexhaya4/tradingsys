@@ -1,0 +1,542 @@
+# tradingsys: Master Specification and Roadmap
+
+**Status:** Living document. Authoritative.
+**Owner:** Alex (director). Implementation delegated to Claude Code sessions.
+**Last structural revision:** Phase 1 in progress.
+
+---
+
+## 0. How to use this document
+
+This file exists so that any new session, human or model, can be brought to
+full context by reading it alone. If you are a Claude Code session picking this
+project up cold:
+
+1. Read this document end to end before writing any code.
+2. Read `PROGRESS.md` in the repo root to find the current phase and the last
+   completed task.
+3. Do not begin work outside the current phase. Phases are gated deliberately.
+4. If a decision is required that this document does not answer, stop and ask
+   the director. Do not guess, and do not implement a temporary answer.
+
+When a phase completes, update `PROGRESS.md`, never this file, unless the
+director explicitly revises scope.
+
+---
+
+## 1. What is being built
+
+An automated trading system that operates on foreign exchange and
+cryptocurrency markets. The system ingests market data and scheduled
+macroeconomic events, derives directional signals, sizes positions under
+explicit risk constraints, executes orders through broker and exchange APIs,
+and manages open positions to defined take-profit and stop-loss outcomes.
+
+This is a real application intended to trade real capital. It is not a
+prototype, a demonstration, or a learning exercise.
+
+### 1.1 What it is not
+
+The system is not a high-frequency or latency-arbitrage strategy. It does not
+compete on execution speed. It operates on timeframes where a round trip of
+tens to hundreds of milliseconds is immaterial.
+
+The system is not a market-making or liquidity-provision strategy.
+
+The system does not use leverage beyond what is explicitly configured and
+enforced by the risk engine.
+
+---
+
+## 2. Non-negotiable engineering standards
+
+These apply to every line of code in this repository, in every phase, without
+exception.
+
+**Production grade only.** No toy solutions, no placeholder logic, no demo
+code, no experimental packages. No mocked behavior standing in for real logic
+in shipped code paths. No hardcoded values. No "good enough for now."
+
+**Stop rather than shortcut.** If a correct implementation requires more scope,
+more time, or more information than the current phase allows, say so and stop.
+Do not ship a degraded version and flag it for later. Later does not come.
+
+**No silent failure.** Every error path is either handled explicitly or
+propagated loudly. No bare `except`. No swallowed exceptions. No function that
+returns a default value when it could not do its job.
+
+**Decimal for money, always.** Floating point never touches a price, a
+quantity, a balance, or a profit-and-loss figure. This is enforced by type
+signature and by test.
+
+**No em-dashes** in code, comments, documentation, commit messages, or any
+generated artifact.
+
+**Everything is tested.** New code arrives with unit tests that exercise real
+behavior, including failure modes. Integration tests run against venue sandbox
+environments, not against fabricated response fixtures alone.
+
+**Typed and linted.** `mypy --strict` passes. `ruff` passes. Both run in CI and
+both block merge.
+
+**Auditability.** Every decision the system makes, from signal generation to
+order submission to position closure, is written to an append-only audit log
+with a correlation ID that links the full causal chain. If the system takes an
+action that cannot be explained afterward from the audit log, that is a defect.
+
+**Reproducibility.** Dependencies are pinned via lockfile. Builds are
+containerized. A backtest run is reproducible from its configuration and a
+data snapshot.
+
+---
+
+## 3. Architecture
+
+### 3.1 Process topology
+
+The system runs as separate supervised processes, not as one monolith. Process
+isolation is a safety property, not an aesthetic choice: a fault or bug in
+strategy code must not be able to compromise risk enforcement.
+
+```
+  ingest        market data and news collection, writes to store
+  strategy      reads store, emits signal intents
+  risk          validates every intent against limits, holds the kill switch
+  execution     submits and manages orders, reconciles against venue truth
+  monitor       health, metrics, alerting, reconciliation checks
+```
+
+Processes communicate through Redis streams with explicit message contracts.
+No process reaches into another's internal state.
+
+### 3.2 The risk engine boundary
+
+This is the most important design rule in the project.
+
+The risk engine is the only component permitted to authorize an order. It
+maintains its own view of open positions and account balance, sourced by
+polling the venue directly, never by trusting what the strategy process
+believes. Where the strategy's view and the venue's view disagree, the venue
+wins and the discrepancy raises an alert.
+
+The risk engine holds a kill switch that halts all new order submission and,
+on command, flattens all open positions. The kill switch is triggerable
+manually and automatically. Automatic triggers include daily loss limit
+breach, position count anomaly, reconciliation mismatch, stale market data
+beyond threshold, and repeated venue API failures.
+
+The risk engine defaults to refusing. If it cannot verify state, it does not
+authorize.
+
+### 3.3 Venue abstraction
+
+Two interfaces, both venue neutral:
+
+`MarketDataSource` covers instrument metadata, historical bar retrieval, and
+live streaming subscription.
+
+`ExecutionVenue` covers account state, position query, order submission, order
+modification, order cancellation, and fill notification.
+
+The abstraction must accommodate the real differences between foreign exchange
+and cryptocurrency venues:
+
+| Concern | Forex | Crypto |
+|---|---|---|
+| Sizing | units or lots, instrument-specific | base asset quantity |
+| Precision | pip and pipette, varies by pair | tick size, varies by market |
+| Financing | swap, charged at rollover | funding rate, perpetuals only |
+| Hours | sessions, weekend closure, holidays | continuous |
+| Leverage | broker-set, jurisdiction-capped | venue and product dependent |
+| Settlement | none, margin positions | spot settles, perpetuals do not |
+
+No venue-specific field name, identifier format, or enum value appears in the
+base interfaces. Reference implementation targets are OANDA v20 for foreign
+exchange and ccxt with a native WebSocket client for cryptocurrency.
+
+### 3.4 Technology decisions
+
+| Layer | Choice | Rationale |
+|---|---|---|
+| Language | Python 3.12, asyncio | Latency is not the edge. Ecosystem is. |
+| Package manager | uv with lockfile | Fast, deterministic, standards-based. |
+| Config | pydantic-settings, TOML plus env | Typed, validated, secrets separated. |
+| Database | PostgreSQL 16 with TimescaleDB | Time-series plus relational in one engine. |
+| DB driver | asyncpg | Async, no ORM overhead in hot paths. |
+| Migrations | Alembic | Versioned, reversible schema. |
+| State and IPC | Redis 7 | Streams, position cache, idempotency keys. |
+| Crypto venue | ccxt plus native WebSocket | Unified REST, direct stream for latency. |
+| Forex venue | OANDA v20 | Real streaming, identical practice endpoints. |
+| Logging | structlog, JSON | Machine parseable, correlation IDs. |
+| Metrics | Prometheus plus Grafana | Standard, self-hosted, no vendor lock. |
+| Testing | pytest, pytest-asyncio, hypothesis | Property tests for money and sizing math. |
+| Deployment | Docker Compose, systemd supervision | Reproducible, restartable, simple. |
+
+Rejected: Rust for the core, because it buys latency the strategy does not
+need at the cost of the entire data and language-processing ecosystem. Rejected:
+any hosted backtesting framework, because opaque cost modeling invalidates the
+go/no-go decision that the whole project depends on.
+
+---
+
+## 4. Data model
+
+Core entities. Full DDL lives in Alembic migrations; this is the conceptual
+map.
+
+**instrument** Canonical instrument registry. Venue-neutral symbol, venue
+symbol mapping, asset class, quote currency, price precision, minimum size,
+size increment, financing model.
+
+**ohlcv** Hypertable. Instrument, venue, timeframe, open time, OHLC as
+Decimal, volume, and a completeness flag. Partitioned by time.
+
+**tick** Hypertable. Instrument, venue, timestamp, bid, ask, bid size, ask
+size. Retained at higher resolution for a shorter window than bars.
+
+**macro_event** Scheduled economic releases. Currency affected, event name,
+scheduled time, importance, consensus forecast, previous value, actual value
+once released, revision flag.
+
+**news_item** Unstructured headlines. Source, published time, ingested time,
+headline, body, content hash for deduplication, resolved instrument links.
+
+**signal** Every directional intent the strategy produces, whether or not it
+became an order. Instrument, direction, conviction, generating strategy
+version, input snapshot reference, timestamp.
+
+**risk_decision** Every authorization or refusal by the risk engine, with the
+specific limit evaluated and the outcome.
+
+**order** Submitted orders with venue order ID, idempotency key, requested
+parameters, and lifecycle state transitions.
+
+**fill** Executions against orders, with actual price, quantity, fee, and
+venue timestamp.
+
+**position** Open and historical positions, entry, exit, size, realized and
+unrealized profit and loss, financing charges accrued.
+
+**audit_log** Append-only. Correlation ID, process, event type, structured
+payload. Never updated, never deleted.
+
+Referential rule: a fill traces to an order, an order traces to a risk
+decision, a risk decision traces to a signal, a signal traces to the market
+data and events that produced it. This chain must be queryable.
+
+---
+
+## 5. Strategy and signal design
+
+### 5.1 Sequencing rationale
+
+Scheduled macroeconomic events are built before unstructured news, for a
+concrete reason: they are timestamped in advance, they have a consensus
+forecast against which the actual release can be measured as a surprise, and
+their price impact on foreign exchange is well documented and measurable. They
+give a testable signal. Headlines give a research problem.
+
+### 5.2 Macro event signals
+
+Signal derives from the surprise, meaning the deviation of the actual release
+from consensus, normalized by the historical distribution of surprises for
+that event type. Direction is mapped per event category and per currency, and
+that mapping is derived from historical data in the backtest, not asserted.
+
+Event handling must account for scheduled release blackout windows: the system
+does not hold positions into high-importance releases unless the strategy
+explicitly trades the release, and it does not open positions during the
+spread-widening window immediately following one.
+
+### 5.3 Trend signals
+
+Standard technical trend estimation on multiple timeframes. Specific indicator
+selection is deferred to the backtest phase and must be chosen by out-of-sample
+performance, not by preference. Any indicator set adopted must survive
+walk-forward validation.
+
+### 5.4 News signals
+
+Deferred until phase 4b and explicitly optional. If headline processing cannot
+be shown to add out-of-sample edge over the macro and trend layers, it does not
+ship. Sentiment scoring that looks plausible but does not improve the equity
+curve is decoration.
+
+### 5.5 Overfitting controls
+
+Mandatory, not advisory:
+
+- Walk-forward analysis with strictly out-of-sample test windows.
+- Parameter count declared and justified; parameter sweeps logged in full,
+  including the discarded configurations.
+- No test-set iteration. Once a configuration touches the final holdout, that
+  holdout is burned.
+- Multiple-testing correction applied when comparing many configurations.
+- Results reported with confidence intervals, never as point estimates.
+
+---
+
+## 6. Risk framework
+
+Every constraint below is configured, enforced by the risk engine process, and
+tested.
+
+**Per-trade risk.** A fixed fraction of account equity at risk per position,
+determined by stop distance, not by a fixed lot size. Default ceiling: 1.0
+percent. Hard cap: 2.0 percent.
+
+**Stop loss.** Mandatory on every position. Placed as a venue-side order at
+submission time, not maintained only in local memory, so that a process crash
+cannot leave a position unprotected.
+
+**Take profit.** Defined per strategy as a multiple of stop distance. Minimum
+acceptable reward-to-risk ratio is declared in configuration and enforced at
+authorization time.
+
+**Daily loss limit.** Cumulative realized plus unrealized loss threshold that
+halts all new entries for the session and alerts.
+
+**Maximum drawdown limit.** Peak-to-trough equity threshold that triggers full
+shutdown and requires manual re-enable.
+
+**Correlated exposure cap.** Foreign exchange pairs sharing a currency are
+correlated. Aggregate exposure per currency is capped, not just per pair.
+
+**Position count cap.** Absolute maximum concurrent open positions.
+
+**Leverage cap.** Enforced independently of whatever the venue permits.
+
+**Stale data guard.** If market data for an instrument exceeds a staleness
+threshold, no new positions in that instrument, and existing positions are
+flagged.
+
+**Reconciliation.** Position and balance state reconciled against the venue on
+a fixed interval. Any mismatch halts trading and alerts immediately.
+
+---
+
+## 7. Execution requirements
+
+**Idempotency.** Every order carries a client-generated idempotency key. A
+retry after a network failure must never produce a duplicate position. This is
+tested by fault injection, not assumed.
+
+**Order state machine.** Explicit states with legal transitions. Unknown venue
+responses move the order to an indeterminate state that triggers reconciliation,
+never to an assumed success or failure.
+
+**Partial fills.** Handled as a first-class case in position accounting.
+
+**Rate limiting.** Client-side budget per venue, respecting published limits
+with margin. Exceeding a venue rate limit is a defect, not an accident.
+
+**Reconnection.** Streaming connections reconnect with exponential backoff and
+jitter, and on reconnect they resynchronize state rather than assuming
+continuity.
+
+**Cost accounting.** Spread, commission, slippage, swap, and funding are
+recorded per position and included in all performance reporting. Gross
+performance figures are not reported without net figures alongside them.
+
+---
+
+## 8. Phase plan
+
+Each phase has explicit exit criteria. A phase is not complete until every
+criterion is demonstrably met. Do not begin the next phase early.
+
+### Phase 1: Foundation
+Project structure, configuration system, venue abstractions, core domain types
+including Money and Instrument, database schema and migrations, structured
+logging, metrics and health endpoints, local Docker Compose environment.
+
+*Exit criteria:* `mypy --strict` and `ruff` clean. Test suite green. Compose
+stack starts and all health checks pass. Configuration fails loudly on missing
+required values, verified by test. No adapter implementations present.
+
+### Phase 2: Market data
+Live and historical ingestion for both venues. Gap detection and backfill.
+Instrument registry populated from venue metadata. Storage validated for
+precision and completeness.
+
+*Exit criteria:* Continuous ingestion sustained for 72 hours with no data loss.
+Gap detection proven by deliberate disconnection. Stored values verified
+bit-exact against venue-reported values for a sampled set. Reconnection tested
+under forced network failure.
+
+### Phase 3: Backtest engine
+Event-driven simulation with realistic cost modeling: spread from recorded
+bid-ask, slippage model calibrated against observed fills, commission, swap and
+funding. Walk-forward harness. Performance and risk metrics reporting.
+
+*Exit criteria:* Engine reproduces a known trade sequence exactly. Cost model
+validated against real historical spreads. Look-ahead bias tested for
+explicitly, including a deliberate look-ahead injection that the harness must
+detect. Reports include confidence intervals.
+
+### Phase 4a: Macro event signals
+Economic calendar ingestion, surprise computation, event-to-direction mapping
+derived from history, blackout window logic.
+
+*Exit criteria:* Calendar coverage verified against an independent source.
+Surprise calculation validated on historical releases. Out-of-sample results
+reported honestly, including if the edge is absent.
+
+### Phase 4b: Trend signals and optional news layer
+Trend estimation, indicator selection by out-of-sample performance. Headline
+ingestion and scoring only if it demonstrably adds edge.
+
+*Exit criteria:* Walk-forward results with parameter counts declared. News
+layer ships only if it improves out-of-sample net performance; otherwise it is
+cut and that decision is recorded.
+
+### Phase 5: Risk engine and position management
+Full risk framework as specified in section 6. Kill switch. Reconciliation
+loop. Position lifecycle management.
+
+*Exit criteria:* Every limit in section 6 has a test proving it blocks the
+action it is meant to block. Kill switch tested under live paper conditions.
+Reconciliation mismatch tested by deliberate divergence injection.
+
+### Phase 6: Execution layer
+Venue adapters, order state machine, idempotency, partial fill handling, rate
+limiting, reconnection.
+
+*Exit criteria:* Duplicate order prevention proven by fault injection.
+Adapters tested against both venues' sandbox environments. Rate limit
+compliance verified under load.
+
+### Phase 7: Paper trading
+Full pipeline running against live market data with simulated execution, for a
+minimum of thirty consecutive calendar days covering varied market conditions.
+
+*Exit criteria:* Thirty days completed with no unhandled exceptions, no
+reconciliation failures, and no risk limit breaches. Complete performance
+report produced with net-of-cost figures.
+
+### Phase 8: Go/no-go gate
+
+**This gate is real and it can end the project.**
+
+The decision to deploy capital is made here, on evidence, by the director. The
+criteria are set before the paper trading period begins, not after, so that
+they cannot be adjusted to fit the result.
+
+Deployment requires all of the following:
+- Net-of-cost profitability over the paper period.
+- Maximum drawdown within the configured tolerance.
+- Live paper results consistent with backtested expectations for the same
+  window. Large divergence means the backtest is wrong, and a wrong backtest
+  invalidates the entire evidence base.
+- Zero unresolved defects in risk enforcement or execution.
+- Operational stability demonstrated: no unexplained restarts, no data gaps.
+
+If the criteria are not met, the outcome is redesign or termination. Extending
+the paper period to search for a favorable window is not permitted, because
+that is data mining the go decision itself.
+
+### Phase 9: Live deployment
+Minimum viable capital. Production infrastructure with monitoring and alerting.
+Documented runbook covering start, stop, kill switch, reconciliation failure,
+and venue outage. Capital scaling only against demonstrated live performance
+over a defined period.
+
+*Exit criteria:* Runbook validated by executing every procedure in it. Alerting
+verified by triggering each alert condition. Live results tracked against paper
+expectations with an explicit stop-down rule if they diverge.
+
+---
+
+## 9. Security
+
+Credentials live in environment variables or a secret manager. Never in files,
+never in the repository, never in logs. Secret scanning runs in CI.
+
+API keys are scoped to the minimum permission set. Withdrawal permissions are
+never granted to a trading key.
+
+Production database access is restricted. The application role has no schema
+modification rights.
+
+The audit log is append-only at the database permission level, not merely by
+convention.
+
+Dependency vulnerability scanning runs in CI and blocks on high severity
+findings.
+
+Server access is key-based only. The trading host runs nothing but this system.
+
+---
+
+## 10. Operations
+
+**Monitoring.** Prometheus scrapes every process. Grafana dashboards cover
+system health, data freshness, position state, and performance. Alerts route to
+a channel the director actually reads.
+
+**Alert conditions.** Process down, data staleness, reconciliation mismatch,
+risk limit breach, venue API failure rate, daily loss threshold approach,
+unhandled exception.
+
+**Backups.** Database backed up on a schedule, with restore tested. An untested
+backup is not a backup.
+
+**Deployment.** Versioned releases. Rollback procedure documented and tested.
+Configuration changes are version controlled and reviewed.
+
+**Runbook.** Lives at `docs/RUNBOOK.md`. Covers every operational procedure and
+every alert response. Written before live deployment, not after the first
+incident.
+
+---
+
+## 11. Regulatory and jurisdictional constraints
+
+Broker account eligibility must be confirmed for the director's jurisdiction
+before phase 8. Practice environments are generally open, so phases 1 through 7
+proceed regardless, but the venue choice must be validated before capital is
+committed. If the reference broker is unavailable, the venue abstraction
+absorbs the substitution without architectural change. This is a stated reason
+for the abstraction existing.
+
+Tax treatment of trading profits is the director's responsibility and outside
+system scope, but the audit log must contain sufficient detail to support
+whatever reporting is required.
+
+---
+
+## 12. Definition of done, per task
+
+A task is complete when all of the following hold:
+
+- Implementation is real, with no placeholder, stub, or mocked logic in
+  production paths.
+- Unit tests cover behavior and failure modes, and they pass.
+- `mypy --strict` passes. `ruff` passes.
+- Errors are handled explicitly or propagated deliberately.
+- Money and quantity values use Decimal throughout.
+- Decisions and actions are written to the audit log with correlation IDs.
+- Configuration is externalized, with no hardcoded values.
+- Documentation reflects the change.
+- No em-dashes anywhere in the output.
+
+If any of these cannot be satisfied within the current scope, stop and report
+it. Do not ship the task partially satisfied.
+
+---
+
+## 13. Session recovery protocol
+
+When a session is lost or begins degrading:
+
+1. Read this document in full.
+2. Read `PROGRESS.md` for the current phase and last completed task.
+3. Read `docs/DECISIONS.md` for the log of decisions made and their reasons.
+4. Run the test suite to establish the actual state of the code, which is more
+   reliable than any written claim about it.
+5. Resume at the next incomplete task within the current phase.
+
+Do not restructure completed work, do not "improve" code outside the current
+task, and do not skip forward to a later phase because it seems more
+interesting. If the plan appears wrong, raise it with the director rather than
+unilaterally changing course.

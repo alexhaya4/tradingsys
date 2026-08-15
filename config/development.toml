@@ -1,0 +1,17 @@
+# Local development overrides, layered on top of base.toml.
+
+[app]
+environment = "development"
+
+[observability]
+log_level = "debug"
+log_format = "console"
+
+[database]
+# Matches the service name in docker-compose.yml when the app runs in the compose
+# network. Override with TRADINGSYS_DATABASE__HOST=localhost when running on the host.
+host = "db"
+ssl_mode = "disable"
+
+[redis]
+host = "redis"

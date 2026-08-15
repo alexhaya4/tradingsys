@@ -1,0 +1,30 @@
+# Production overrides, layered on top of base.toml.
+#
+# Enabling a live venue also requires app.allow_live_trading, which is deliberately
+# left false here: arming real orders is an explicit, reviewable change rather than a
+# side effect of deploying to production.
+
+[app]
+environment = "production"
+shutdown_grace_seconds = 30.0
+allow_live_trading = false
+
+[observability]
+log_level = "info"
+log_format = "json"
+
+[database]
+min_pool_size = 5
+max_pool_size = 20
+command_timeout_seconds = 15.0
+ssl_mode = "require"
+
+[venues.forex]
+enabled = false
+environment = "live"
+rest_url = "https://api-fxtrade.oanda.com"
+stream_url = "https://stream-fxtrade.oanda.com"
+
+[venues.crypto.binance]
+enabled = false
+sandbox = false

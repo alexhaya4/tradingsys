@@ -1,0 +1,26 @@
+# Automated test overrides, layered on top of base.toml.
+#
+# Pool sizes are small and timeouts short so that a hung dependency fails a test run
+# quickly rather than stalling it.
+
+[app]
+environment = "test"
+shutdown_grace_seconds = 1.0
+
+[observability]
+log_level = "warning"
+log_format = "json"
+http_port = 8001
+
+[database]
+host = "localhost"
+database = "tradingsys_test"
+min_pool_size = 1
+max_pool_size = 4
+connect_timeout_seconds = 5.0
+command_timeout_seconds = 10.0
+ssl_mode = "disable"
+
+[redis]
+host = "localhost"
+db = 1

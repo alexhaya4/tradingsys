@@ -1,0 +1,67 @@
+# Non-secret defaults shared by every environment.
+#
+# Values here are committed to version control. Anything typed as a secret in
+# tradingsys/config/settings.py is refused from this file at startup: supply those
+# through environment variables or the secrets directory.
+#
+# Per-environment overrides live in development.toml, test.toml, staging.toml, and
+# production.toml, each layered on top of this file.
+
+[app]
+name = "tradingsys"
+environment = "development"
+shutdown_grace_seconds = 20.0
+allow_live_trading = false
+
+[database]
+host = "localhost"
+port = 5432
+database = "tradingsys"
+user = "tradingsys"
+min_pool_size = 2
+max_pool_size = 10
+connect_timeout_seconds = 10.0
+command_timeout_seconds = 30.0
+# asyncpg's per-connection prepared statement cache. Kept off by default because
+# PgBouncer in transaction pooling mode cannot support it.
+statement_cache_size = 0
+ssl_mode = "prefer"
+
+[redis]
+host = "localhost"
+port = 6379
+db = 0
+socket_timeout_seconds = 5.0
+connect_timeout_seconds = 5.0
+
+[observability]
+service_name = "tradingsys"
+log_level = "info"
+log_format = "json"
+http_host = "0.0.0.0"
+http_port = 8000
+health_path = "/health"
+ready_path = "/ready"
+metrics_path = "/metrics"
+readiness_timeout_seconds = 3.0
+
+[venues.forex]
+# account_id and api_token are deliberately absent: the account is deployment
+# specific and the token is a secret. Both come from the environment, and enabling
+# the venue without them fails at startup.
+enabled = false
+environment = "practice"
+rest_url = "https://api-fxpractice.oanda.com"
+stream_url = "https://stream-fxpractice.oanda.com"
+request_timeout_seconds = 10.0
+stream_read_timeout_seconds = 20.0
+max_retries = 3
+retry_backoff_seconds = 0.5
+max_requests_per_second = 30.0
+
+[venues.crypto.binance]
+enabled = false
+exchange_id = "binance"
+sandbox = true
+request_timeout_seconds = 10.0
+max_requests_per_second = 10.0

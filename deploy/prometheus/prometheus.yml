@@ -1,0 +1,23 @@
+# Local development scrape configuration.
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    environment: development
+
+scrape_configs:
+  - job_name: tradingsys
+    metrics_path: /metrics
+    # Matches observability.http_port in config/base.toml.
+    #
+    # No `service` label is added here: tradingsys_build_info already carries one, and
+    # a target label of the same name would be renamed to exported_service on every
+    # metric, which breaks any query that joins on it.
+    static_configs:
+      - targets: ["app:8000"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
