@@ -123,6 +123,34 @@ class TestCurrencySafety:
         assert Money.of(1, USD) != 1
         assert Money.of(1, USD) != "1 USD"
 
+    def test_adding_a_bare_number_is_a_type_error(self) -> None:
+        # The operators return NotImplemented for a non-Money operand, which makes
+        # Python raise rather than silently treating a bare 5 as five dollars.
+        with pytest.raises(TypeError):
+            _ = Money.of(1, USD) + 5  # type: ignore[operator]
+
+    def test_subtracting_a_bare_number_is_a_type_error(self) -> None:
+        with pytest.raises(TypeError):
+            _ = Money.of(1, USD) - 5  # type: ignore[operator]
+
+    def test_adding_a_decimal_is_a_type_error(self) -> None:
+        # Decimal is the one that would look most plausible, and is exactly the case
+        # where a currency would be silently invented.
+        with pytest.raises(TypeError):
+            _ = Money.of(1, USD) + Decimal(5)  # type: ignore[operator]
+
+    @pytest.mark.parametrize("other", [5, "5", Decimal(5), None])
+    def test_ordering_against_a_non_money_value_is_a_type_error(self, other: object) -> None:
+        amount = Money.of(1, USD)
+        with pytest.raises(TypeError):
+            _ = amount < other  # type: ignore[operator]
+        with pytest.raises(TypeError):
+            _ = amount <= other  # type: ignore[operator]
+        with pytest.raises(TypeError):
+            _ = amount > other  # type: ignore[operator]
+        with pytest.raises(TypeError):
+            _ = amount >= other  # type: ignore[operator]
+
 
 class TestComparison:
     def test_ordering(self) -> None:
