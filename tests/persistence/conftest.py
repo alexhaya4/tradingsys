@@ -5,21 +5,20 @@ environment, which matches the compose stack. They **fail** rather than skip whe
 database is unreachable: a suite that quietly skips its only real storage coverage
 reports green while testing nothing.
 
-Run them with::
+Run them through the one verification path::
 
-    docker compose up -d db
-    uv run alembic upgrade head
-    TRADINGSYS_APP__ENVIRONMENT=test uv run pytest -m integration
+    scripts/verify.sh
+
+The settings themselves come from the shared ``live_settings`` fixture in the parent
+conftest, so a missing credential is reported once rather than once per test.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
-from tradingsys.config import Environment, load_settings
 from tradingsys.core.clock import SystemClock
 from tradingsys.core.currency import default_registry
 from tradingsys.persistence.audit import AuditLog
@@ -31,34 +30,23 @@ if TYPE_CHECKING:
 
     from tradingsys.config import Settings
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
 REQUIRED_TABLES = ("instruments", "ohlcv_bars", "ticks", "audit_log")
 
 
-@pytest.fixture(scope="session")
-def settings() -> Settings:
-    """Test environment settings, with the database password from the environment."""
-    return load_settings(
-        config_dir=REPO_ROOT / "config",
-        environment=Environment.TEST,
-    )
-
-
 @pytest.fixture
-async def database(settings: Settings) -> AsyncIterator[Database]:
+async def database(live_settings: Settings) -> AsyncIterator[Database]:
     """A connected pool against the test database.
 
     Fails with an actionable message if the database is not running or the migrations
     have not been applied, rather than skipping.
     """
-    db = Database(settings.database)
+    db = Database(live_settings.database)
     try:
         await db.connect()
     except Exception as exc:  # the message matters more than the type
         pytest.fail(
-            f"integration tests need PostgreSQL at {settings.database.dsn()}: {exc}\n"
-            f"Start it with: docker compose up -d db"
+            f"integration tests need PostgreSQL at {live_settings.database.dsn()}: {exc}\n"
+            f"Start it with: scripts/verify.sh"
         )
     try:
         missing = [
@@ -69,7 +57,8 @@ async def database(settings: Settings) -> AsyncIterator[Database]:
         if missing:
             pytest.fail(
                 f"the test database is missing {', '.join(missing)}. Apply the migrations "
-                f"with: TRADINGSYS_APP__ENVIRONMENT=test uv run alembic upgrade head"
+                f"with: scripts/verify.sh, or directly with "
+                f"TRADINGSYS_APP__ENVIRONMENT=test uv run alembic upgrade head"
             )
         await _truncate(db)
         yield db

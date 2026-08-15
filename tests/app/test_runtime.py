@@ -115,12 +115,19 @@ class TestStartupFailure:
         await application.stop()
 
     async def test_stop_is_safe_before_start(self, settings: Settings) -> None:
-        await Application.build(settings).stop()
+        # Shutdown paths call stop() from a finally block, so it has to work on an
+        # application that never got as far as connecting.
+        application = Application.build(settings)
+        await application.stop()
+        assert not application.is_started
+        assert not application.database.is_connected
 
     async def test_stop_is_idempotent(self, settings: Settings) -> None:
         application = Application.build(settings)
         await application.stop()
         await application.stop()
+        assert not application.is_started
+        assert not application.database.is_connected
 
 
 class TestRequiredTables:
@@ -132,12 +139,10 @@ class TestRequiredTables:
 
 @pytest.mark.integration
 class TestLifecycle:
-    """End to end against the compose stack."""
+    """End to end against the compose stack.
 
-    @pytest.fixture
-    def live_settings(self) -> Settings:
-        """Settings from the real process environment, so the password is the real one."""
-        return load_settings(config_dir=REPO_ROOT / "config", environment=Environment.TEST)
+    ``live_settings`` comes from the root conftest, shared with the persistence suite.
+    """
 
     async def test_start_and_stop(self, live_settings: Settings) -> None:
         application = Application.build(live_settings)
@@ -273,6 +278,14 @@ class TestLifecycle:
         async with running(live_settings) as application:
             server = asyncio.create_task(serve(application))
             await asyncio.sleep(0.5)
+            assert not server.done(), "the server exited before the signal arrived"
+
             os.kill(os.getpid(), signal.SIGTERM)
             async with asyncio.timeout(10):
                 await server
+
+            # Completed rather than cancelled: the signal has to unwind serve() through
+            # its own shutdown path, not kill the task from outside.
+            assert server.done()
+            assert not server.cancelled()
+            assert server.exception() is None

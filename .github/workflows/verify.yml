@@ -1,0 +1,57 @@
+# CI runs the same script a developer runs, and nothing else.
+#
+# There are deliberately no lint, type, or test commands in this file. Every gate lives
+# in scripts/verify.sh, so CI and a local run cannot drift apart: if this workflow is
+# green and your machine is red, the difference is your machine, not the pipeline.
+#
+# Provider note: this targets GitHub Actions. Moving to another provider means
+# rewriting the eight lines below, because all the real work is in the script.
+
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      # The stack is created and destroyed within the job, so these are throwaway
+      # credentials for an ephemeral database rather than secrets to be protected.
+      # They exist because the application refuses to start without them, which is the
+      # behaviour under test.
+      POSTGRES_PASSWORD: ci-ephemeral-postgres
+      TRADINGSYS_DATABASE__PASSWORD: ci-ephemeral-postgres
+      GRAFANA_PASSWORD: ci-ephemeral-grafana
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Verify from an empty volume
+        # --fresh destroys the compose volumes first, so this provisions a database
+        # from nothing and applies every migration base to head against it. That is
+        # the path a production provision takes, and the path a multi revision
+        # migration bug hides in: every developer machine has a database that already
+        # exists in some shape, so nothing else exercises it.
+        run: scripts/verify.sh --fresh --down
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker compose logs --tail 200
