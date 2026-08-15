@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import struct
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, getcontext
 from zoneinfo import ZoneInfo
@@ -10,7 +11,12 @@ import pytest
 
 from tradingsys.core.clock import FixedClock, SystemClock, ensure_utc, new_id, utc_now
 from tradingsys.core.errors import DomainError
-from tradingsys.core.numeric import ARITHMETIC_PRECISION, exact_context, to_decimal
+from tradingsys.core.numeric import (
+    ARITHMETIC_PRECISION,
+    exact_context,
+    from_binary32,
+    to_decimal,
+)
 from tradingsys.core.rounding import Rounding
 
 
@@ -141,3 +147,54 @@ class TestIdentifiers:
 
     def test_new_id_is_unique(self) -> None:
         assert len({new_id() for _ in range(1000)}) == 1000
+
+
+class TestFromBinary32:
+    """The one sanctioned float door, for fields a venue publishes as 32 bit binary."""
+
+    def test_the_expansion_is_exact_not_rounded(self) -> None:
+        # 0.9 is not representable in binary. This is the exact value of the 32 bit
+        # pattern, so it looks wrong and is right; anything shorter would be a value
+        # the source never sent.
+        assert from_binary32(struct.unpack(">f", struct.pack(">f", 0.9))[0]) == Decimal(
+            "0.89999997615814208984375"
+        )
+
+    def test_the_result_converts_back_to_the_same_bits(self) -> None:
+        for sample in (0.0, 1.0, 0.9, 5.04, 2.7, 1e-30, 3.4e38):
+            value: float = struct.unpack(">f", struct.pack(">f", sample))[0]
+            assert struct.pack(">f", float(from_binary32(value))) == struct.pack(">f", value)
+
+    def test_an_exactly_representable_value_keeps_its_familiar_form(self) -> None:
+        assert from_binary32(1.25) == Decimal("1.25")
+
+    def test_negative_values_are_converted(self) -> None:
+        # Sign is the caller's business; this gate only rules on exactness.
+        assert from_binary32(-1.5) == Decimal("-1.5")
+
+    def test_a_double_that_is_not_a_binary32_is_refused(self) -> None:
+        # 0.1 as a double is a different number from 0.1 as a binary32, so a value that
+        # fails this round trip did not come from where the caller thinks it did.
+        with pytest.raises(DomainError, match="not exactly representable in binary32"):
+            from_binary32(0.1)
+
+    def test_a_value_beyond_the_binary32_range_is_refused(self) -> None:
+        with pytest.raises(DomainError, match="outside the binary32 range"):
+            from_binary32(1e39)
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_values_are_refused(self, value: float) -> None:
+        with pytest.raises(DomainError, match="must be finite"):
+            from_binary32(value)
+
+    @pytest.mark.parametrize("value", [1, Decimal("1.5"), "1.5", True])
+    def test_non_floats_are_refused(self, value: object) -> None:
+        # Not a convenience converter: an int or a Decimal is already exact and belongs
+        # in to_decimal, and accepting one here would make this function a place where
+        # anything at all can be turned into a Decimal.
+        with pytest.raises(TypeError, match="must be a float unpacked from a binary32"):
+            from_binary32(value)  # type: ignore[arg-type]
+
+    def test_the_error_names_the_field(self) -> None:
+        with pytest.raises(DomainError, match="record 3 bid volume"):
+            from_binary32(0.1, what="record 3 bid volume")

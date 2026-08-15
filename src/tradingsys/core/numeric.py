@@ -7,6 +7,8 @@ out and the working precision used for multiplication and division.
 
 from __future__ import annotations
 
+import math
+import struct
 from collections.abc import Iterator
 from contextlib import contextmanager
 from decimal import Context, Decimal, InvalidOperation, localcontext
@@ -18,6 +20,7 @@ __all__ = [
     "ARITHMETIC_PRECISION",
     "Numeric",
     "exact_context",
+    "from_binary32",
     "to_decimal",
 ]
 
@@ -77,3 +80,47 @@ def to_decimal(value: object, *, what: str = "value") -> Decimal:
     if not decimal_value.is_finite():
         raise DomainError(f"{what} must be finite, got {value!r}")
     return decimal_value
+
+
+def from_binary32(value: float, *, what: str = "value") -> Decimal:
+    """The exact decimal value of a number that arrived on the wire as IEEE-754 binary32.
+
+    This is the one sanctioned float to Decimal door in the system, and it exists for a
+    narrow case: a venue that publishes a field as 32 bit binary, as Dukascopy does for
+    tick volumes. There the float is not an approximation of some truer decimal number,
+    it *is* the value the source published, and its exact expansion is therefore the
+    faithful record rather than a lossy one. ``Decimal(0.9)`` looks alarming at
+    0.89999997615814208984375 but converts back to the identical 32 bit pattern, which
+    is what "bit exact against what the venue reported" means here.
+
+    Rounding to something prettier is the lossy option, not the safe one, because the
+    rounded value no longer round trips and the discrepancy can never be recovered.
+
+    Args:
+        value: A float that came from unpacking four bytes of binary32.
+        what: Name of the value, used in error messages.
+
+    Raises:
+        TypeError: ``value`` is not a float, so it did not come from a binary32 field.
+        DomainError: ``value`` is NaN, infinite, or is a double that no binary32 can
+            represent, which means it did not come from where the caller believes.
+    """
+    if isinstance(value, bool) or not isinstance(value, float):
+        raise TypeError(
+            f"{what} must be a float unpacked from a binary32 field, got "
+            f"{type(value).__name__}: {value!r}. Values that are already exact belong "
+            f"in to_decimal."
+        )
+    if not math.isfinite(value):
+        raise DomainError(f"{what} must be finite, got {value!r}")
+    try:
+        round_tripped: float = struct.unpack(">f", struct.pack(">f", value))[0]
+    except OverflowError:
+        raise DomainError(f"{what} is outside the binary32 range: {value!r}") from None
+    if round_tripped != value:
+        raise DomainError(
+            f"{what} is not exactly representable in binary32: {value!r}. A double that "
+            f"survives no 32 bit round trip did not come from a binary32 field, so "
+            f"converting it here would record a precision the source never had."
+        )
+    return Decimal(value)
