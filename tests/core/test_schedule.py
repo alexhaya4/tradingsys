@@ -303,3 +303,129 @@ class TestLocalDate:
     def test_local_date_uses_the_schedule_timezone(self) -> None:
         schedule = forex_schedule()
         assert schedule.local_date(datetime(2025, 3, 5, 2, 0, tzinfo=UTC)) == date(2025, 3, 4)
+
+
+class TestOpenIntervals:
+    """The window view of a schedule, which is what gap detection consumes."""
+
+    def test_a_window_inside_a_session_is_returned_whole(self) -> None:
+        schedule = forex_schedule()
+        window = (datetime(2025, 3, 5, 8, tzinfo=UTC), datetime(2025, 3, 5, 16, tzinfo=UTC))
+        assert schedule.open_intervals(*window) == (window,)
+
+    def test_the_weekend_is_excluded(self) -> None:
+        schedule = forex_schedule()
+        intervals = schedule.open_intervals(
+            datetime(2025, 3, 7, 12, tzinfo=UTC), datetime(2025, 3, 10, 12, tzinfo=UTC)
+        )
+        assert intervals == (
+            (datetime(2025, 3, 7, 12, tzinfo=UTC), datetime(2025, 3, 7, 22, tzinfo=UTC)),
+            (datetime(2025, 3, 9, 21, tzinfo=UTC), datetime(2025, 3, 10, 12, tzinfo=UTC)),
+        )
+
+    def test_a_continuous_venue_returns_the_window(self) -> None:
+        schedule = TradingSchedule.continuous()
+        window = (datetime(2025, 3, 7, 12, tzinfo=UTC), datetime(2025, 3, 10, 12, tzinfo=UTC))
+        assert schedule.open_intervals(*window) == (window,)
+
+    def test_a_continuous_venue_is_split_by_a_holiday(self) -> None:
+        schedule = TradingSchedule.continuous(timezone="UTC", holidays=[date(2025, 3, 8)])
+        intervals = schedule.open_intervals(
+            datetime(2025, 3, 7, 12, tzinfo=UTC), datetime(2025, 3, 9, 12, tzinfo=UTC)
+        )
+        assert intervals == (
+            (datetime(2025, 3, 7, 12, tzinfo=UTC), datetime(2025, 3, 8, tzinfo=UTC)),
+            (datetime(2025, 3, 9, tzinfo=UTC), datetime(2025, 3, 9, 12, tzinfo=UTC)),
+        )
+
+    def test_touching_sessions_are_reported_as_one_interval(self) -> None:
+        # A venue with a morning and an afternoon session that meet at noon quotes
+        # continuously across the boundary. Reporting two intervals would invite a
+        # caller to treat the seam as closed.
+        schedule = TradingSchedule.weekly(
+            timezone="UTC",
+            sessions=[
+                WeeklySession(
+                    open_day=Weekday.MONDAY,
+                    open_time=time(8, 0),
+                    close_day=Weekday.MONDAY,
+                    close_time=time(12, 0),
+                ),
+                WeeklySession(
+                    open_day=Weekday.MONDAY,
+                    open_time=time(12, 0),
+                    close_day=Weekday.MONDAY,
+                    close_time=time(16, 0),
+                ),
+            ],
+        )
+        intervals = schedule.open_intervals(
+            datetime(2025, 3, 3, tzinfo=UTC), datetime(2025, 3, 4, tzinfo=UTC)
+        )
+        assert intervals == (
+            (datetime(2025, 3, 3, 8, tzinfo=UTC), datetime(2025, 3, 3, 16, tzinfo=UTC)),
+        )
+
+    def test_a_session_already_open_at_the_window_start_is_clipped_not_dropped(self) -> None:
+        # The session opened on Sunday evening. A window starting on Wednesday must
+        # still see it, which is why expansion begins a week early.
+        schedule = forex_schedule()
+        intervals = schedule.open_intervals(
+            datetime(2025, 3, 5, tzinfo=UTC), datetime(2025, 3, 5, 6, tzinfo=UTC)
+        )
+        assert intervals == (
+            (datetime(2025, 3, 5, tzinfo=UTC), datetime(2025, 3, 5, 6, tzinfo=UTC)),
+        )
+
+    def test_an_empty_window_has_no_intervals(self) -> None:
+        instant = datetime(2025, 3, 5, tzinfo=UTC)
+        assert forex_schedule().open_intervals(instant, instant) == ()
+
+    def test_a_reversed_window_is_rejected(self) -> None:
+        with pytest.raises(DomainError, match="is before start"):
+            forex_schedule().open_intervals(
+                datetime(2025, 3, 6, tzinfo=UTC), datetime(2025, 3, 5, tzinfo=UTC)
+            )
+
+    def test_naive_bounds_are_rejected(self) -> None:
+        with pytest.raises(DomainError, match="timezone aware"):
+            forex_schedule().open_intervals(datetime(2025, 3, 5), datetime(2025, 3, 6))  # noqa: DTZ001
+
+    def test_a_window_entirely_inside_a_holiday_is_empty(self) -> None:
+        schedule = TradingSchedule.continuous(timezone="UTC", holidays=[date(2025, 3, 8)])
+        assert (
+            schedule.open_intervals(
+                datetime(2025, 3, 8, 2, tzinfo=UTC), datetime(2025, 3, 8, 20, tzinfo=UTC)
+            )
+            == ()
+        )
+
+
+class TestHolidayParsing:
+    def test_a_date_object_is_accepted(self) -> None:
+        schedule = TradingSchedule.from_mapping(
+            {"timezone": "UTC", "always_open": True, "holidays": [date(2025, 12, 25)]}
+        )
+        assert schedule.holidays == frozenset({date(2025, 12, 25)})
+
+    def test_a_datetime_is_rejected(self) -> None:
+        # datetime is a subclass of date, so an unguarded isinstance check would accept
+        # this and then store a value that never compares equal to a local date.
+        with pytest.raises(DomainError, match="not a datetime"):
+            TradingSchedule.from_mapping(
+                {
+                    "timezone": "UTC",
+                    "always_open": True,
+                    "holidays": [datetime(2025, 12, 25, tzinfo=UTC)],
+                }
+            )
+
+    def test_a_non_date_is_rejected(self) -> None:
+        with pytest.raises(DomainError, match="cannot interpret"):
+            TradingSchedule.from_mapping(
+                {"timezone": "UTC", "always_open": True, "holidays": [20251225]}
+            )
+
+    def test_from_mapping_rejects_a_non_list_of_holidays(self) -> None:
+        with pytest.raises(DomainError, match="'holidays' must be a list"):
+            TradingSchedule.from_mapping({"timezone": "UTC", "holidays": {}})

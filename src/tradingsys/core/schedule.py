@@ -28,10 +28,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from tradingsys.core.errors import DomainError
 
 __all__ = [
+    "Interval",
     "TradingSchedule",
     "Weekday",
     "WeeklySession",
 ]
+
+type Interval = tuple[datetime, datetime]
+"""A half open period, ``[start, end)``, both bounds timezone aware."""
 
 _DAYS_IN_WEEK = 7
 _LOOKAHEAD_DAYS = 21
@@ -278,6 +282,75 @@ class TradingSchedule:
             return True
         return any(start <= instant < end for start, end in self._occurrences_around(instant))
 
+    def open_intervals(self, start: datetime, end: datetime) -> tuple[Interval, ...]:
+        """The periods within ``[start, end)`` during which the venue is trading.
+
+        Returned in ascending order, clipped to the requested window, with holidays
+        removed. Adjacent intervals left by a holiday-free boundary are merged, so a
+        continuous week is one interval rather than seven.
+
+        This is what makes gap detection possible without crying wolf: an absence of
+        data is only a gap if it overlaps one of these.
+
+        Raises:
+            DomainError: Either bound is naive, or ``end`` precedes ``start``.
+        """
+        start = self._require_aware(start)
+        end = self._require_aware(end)
+        if end < start:
+            raise DomainError(f"end {end} is before start {start}")
+        if start == end:
+            return ()
+
+        if self.always_open:
+            windows = [(start, end)]
+        else:
+            windows = sorted(
+                (max(open_at, start), min(close_at, end))
+                for open_at, close_at in self._expand_covering(start, end)
+                if open_at < end and close_at > start
+            )
+
+        without_holidays: list[Interval] = []
+        for window_start, window_end in windows:
+            without_holidays.extend(self._remove_holidays(window_start, window_end))
+        return tuple(_merge_adjacent(without_holidays))
+
+    def _expand_covering(self, start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+        """Session occurrences that could overlap ``[start, end)``.
+
+        Expansion begins a week early so that a session opened before ``start`` and
+        still running is included, and runs a day past ``end`` for the same reason at
+        the other edge.
+        """
+        zone = self.zone
+        first = start.astimezone(zone).date() - timedelta(days=_DAYS_IN_WEEK + 1)
+        last = end.astimezone(zone).date() + timedelta(days=1)
+        return self._expand(first, days=(last - first).days + 1)
+
+    def _remove_holidays(self, start: datetime, end: datetime) -> list[Interval]:
+        """Split an interval around any holiday dates it covers."""
+        if not self.holidays:
+            return [(start, end)]
+        zone = self.zone
+        pieces: list[Interval] = []
+        cursor = start
+        day = start.astimezone(zone).date()
+        final = end.astimezone(zone).date()
+        while day <= final:
+            if day in self.holidays:
+                closed_from = datetime.combine(day, time.min, tzinfo=zone)
+                closed_to = closed_from + timedelta(days=1)
+                if cursor < closed_from:
+                    pieces.append((cursor, min(closed_from, end)))
+                cursor = max(cursor, min(closed_to, end))
+            day += timedelta(days=1)
+        if cursor < end:
+            pieces.append((cursor, end))
+        return [
+            (piece_start, piece_end) for piece_start, piece_end in pieces if piece_start < piece_end
+        ]
+
     def next_open(self, instant: datetime) -> datetime | None:
         """The next instant at which trading starts, or ``None`` within the lookahead.
 
@@ -422,6 +495,24 @@ def _parse_date(value: object) -> date:
         except ValueError:
             raise DomainError(f"holiday {value!r} is not an ISO 8601 date") from None
     raise DomainError(f"cannot interpret {value!r} as a date")
+
+
+def _merge_adjacent(intervals: list[Interval]) -> list[Interval]:
+    """Join intervals that touch or overlap.
+
+    Sessions are stored per week, so a continuously open market arrives as one
+    interval per week boundary. Merging them means a caller asking "when was the venue
+    open" gets the answer a human would give rather than an artefact of how the
+    schedule is expressed.
+    """
+    merged: list[Interval] = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1]:
+            previous_start, previous_end = merged[-1]
+            merged[-1] = (previous_start, max(previous_end, end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def _week_offset_seconds(day: Weekday, at: time) -> int:
