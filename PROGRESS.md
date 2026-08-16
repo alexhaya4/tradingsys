@@ -289,7 +289,11 @@ Two items remain open for phase 2:
 | Schedule-aware gap detection | Complete | Compares coverage against `TradingSchedule`, so weekends, holidays, and session boundaries are never reported. Both daylight saving transitions pinned |
 | Dukascopy `.bi5` reader | Complete | In house, validated payloads, exact prices and volumes, byte for byte round trip against a recorded hour |
 | Bybit instrument metadata | Complete | Mapped from `instruments-info`, tested against recorded responses |
-| Bybit market data client and WebSocket recorder | In progress | |
+| Bybit public REST client and rate limiter | Complete | Envelope checked, 403 treated as a ten minute block, retries with jittered backoff |
+| Bybit WebSocket quote stream | Complete | orderbook.1, reconnects with resynchronisation, silence treated as death |
+| Quote recorder into the tick table | Complete | Batched, retried, flushed on shutdown, tagged with its source |
+| Instrument eligibility screen | Complete | Configurable maximum deviation from intended risk, evaluated against live metadata |
+| Funding drag measurement | Complete | Reported below |
 | cTrader adapter | Not started | |
 | Instrument registry from venue metadata | Not started | |
 | Resumable Dukascopy backfill | Not started | |
@@ -333,11 +337,64 @@ trades only, so crypto spread history begins when we start recording. BTC is
 also the reference asset for the regime and correlation work in phase 4. A
 trading exclusion is not a reason to lose the data.
 
+### Funding drag on a 200 USD account
+
+Requested by the director on 2026-08-16. Measured from Bybit's own funding
+history, `GET /v5/market/funding/history`, 600 settlements per instrument
+covering 199.7 days to 2026-08-16.
+
+| ETH/USDT perpetual, funding rate per 8 hours | Value |
+|---|---|
+| Mean, signed | 0.001442 percent |
+| Mean, absolute | 0.004299 percent |
+| Median | 0.001885 percent |
+| 95th percentile | 0.009828 percent |
+| Worst observed, absolute | 0.020824 percent |
+| Settlements where a long pays | 387 of 600 |
+
+**The result does not depend on account size.** Funding is charged on notional
+and risk is notional times the stop distance, so
+
+```
+funding cost as a fraction of one R  =  funding rate / stop distance
+```
+
+The 200 USD account cancels out. What the figure is sensitive to is the stop
+distance, because a tighter stop buys more notional per unit of risk, and a
+0.5 percent stop therefore doubles the drag of a 1 percent one.
+
+At a 1 percent stop, with one R being the 2.00 USD per-trade risk budget:
+
+| Holding period | Mean rates | 95th percentile rates |
+|---|---|---|
+| 1 day | 0.43 percent of 1R | 2.95 percent of 1R |
+| 3 days | 1.30 percent of 1R | 8.85 percent of 1R |
+| 7 days | 3.03 percent of 1R | 20.6 percent of 1R |
+| 14 days | 6.06 percent of 1R | 41.3 percent of 1R |
+
+In cash, the position a 200 USD account takes at 1 percent risk and a 1 percent
+stop is 0.10 ETH, 188.01 USDT of notional, and funding on it costs 0.008 USDT
+per day at mean rates and 0.055 USDT per day at the 95th percentile.
+
+**Conclusion.** Funding is not a material cost for intraday or overnight
+holding at this size: a day costs under half a percent of the trade's risk
+budget at mean rates. It becomes material somewhere past a week. Against a
+hypothetical expectancy of 0.20R per trade, a three day hold costs about 6
+percent of the expected profit at mean rates and about 44 percent at 95th
+percentile rates, and a seven day hold at 95th percentile rates costs the whole
+of it. The 0.20R figure is an assumption for scale only, since no strategy
+exists yet to measure; the percentages of 1R above are the measured part.
+
+The recommendation that follows is not a change to the plan: hold periods
+beyond roughly five days need funding modelled per position in the cost model
+rather than treated as a constant, and the phase 4 backtester must charge
+funding on the actual settlement schedule. The funding anchor is already read
+from the venue for exactly that reason.
+
 ### Open items carried into the rest of phase 2
 
 | Item | Why it matters |
 |---|---|
-| Funding drag on a 200 USD account, as a percentage of expected per-trade profit | Requested by the director on 2026-08-16, to be delivered with the sizing report. If funding is a material fraction of edge at this size, that belongs on the record now rather than in phase 7 |
 | Dukascopy volume units | The feed does not document them. To be confirmed against a published definition, or cross checked against Pepperstone over an overlapping window with the ratio reported |
 | Weekday crypto tick rate | Storage sizing for crypto was deferred to a weekday measurement. A sampling scheme, if one turns out to be warranted, comes with its statistical justification rather than just a rate |
 
