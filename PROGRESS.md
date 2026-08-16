@@ -574,7 +574,7 @@ parses the risk package and rejects any constant that could be an amount of mone
 
 **The finding the director asked for, and it is not comfortable.** The stop ceiling
 at 200 USD, reported per instrument, against reference stop distances that are
-**declared assumptions pending the phase 4a measurement**:
+**declared assumptions pending the phase 4b measurement**:
 
 | Instrument | Stop ceiling | Viable | Blocked |
 |---|---|---|---|
@@ -583,30 +583,58 @@ at 200 USD, reported per instrument, against reference stop distances that are
 | AUD/USD | 20.0 pips | scalping, intraday trend | swing, macro event |
 | USD/JPY | 31.9 pips | scalping, intraday trend | swing, macro event |
 
-**Macro event trading is blocked on every forex pair at this capital.** That is
-worth stating plainly because `SPEC.md` section 5.1 makes scheduled macro events
-the first signal layer to be built, ahead of trend and news, on the grounds that
-they give a testable signal. Section 5.2 is phase 4a. So the capital and the
-strategy plan are in tension, and the tension is arithmetic rather than a matter of
-opinion: a 2.00 USD budget over a 1000 unit venue minimum is 20 pips, whatever the
-strategy wants.
+**Macro event trading is blocked on every forex pair at this capital**, and that
+finding produced the phase reorder recorded below. The tension is arithmetic rather
+than a matter of opinion: a 2.00 USD budget over a 1000 unit venue minimum is 20
+pips, whatever the strategy wants.
 
 The reference distances are assumptions and are labelled as such on every run of
-the check. Phase 4a measures what releases actually move, and at that point this
-becomes evidence rather than an estimate. It is raised now rather than then because
-the ordering of phase 4a is a decision the director may want to revisit before the
-work is done, not after.
+the check. Phase 4b measures what releases actually move, and at that point this
+becomes evidence rather than an estimate.
 
-The options, none of which are taken here: accept a tighter stop than the event
-warrants and expect to be stopped out by noise, trade macro events on the crypto
-leg where the ETH ceiling is 10.6 percent rather than 0.17 percent, raise capital,
-find a venue with a smaller minimum lot, or reorder the phases so trend precedes
-macro. The last is the only one that costs nothing, and it is still the director's
-call.
+**Resolved by the director on 2026-08-17: trend becomes phase 4a and macro events
+become 4b.** See the section below. Trading macro on the crypto leg to route around
+the ceiling was raised as an option and is now explicitly rejected; the reason is in
+`docs/DECISIONS.md` under rejected options, and it is not a capital reason.
 
 **The broker minimum lot investigation is unaffected and still stands.** A smaller
 venue minimum widens the viable strategy set at any capital, which is exactly what
 this table shows the binding constraint to be.
+
+### Phases 4a and 4b reordered: trend first, macro second
+
+**Directed by the director on 2026-08-17.** `SPEC.md` sections 5.1, 8, and the
+phase 8 gate were amended. The rationale for building macro first was preserved
+rather than replaced, because nothing about it has been shown wrong.
+
+**Why.** Two reasons, kept separate because only one can change. Readiness is the
+larger one: trend runs on data already being recorded and can be walk-forward
+tested as soon as the backtest engine exists, whereas macro needs a paid economic
+calendar API that has not been purchased and a surprise-to-direction mapping
+derived from history that has not been collected. Capital is the second: the
+20 pip stop ceiling measured above is inside an intraday trend stop and outside
+what a high importance release moves.
+
+**What reverses it.** A capital increase or a venue with a smaller minimum lot.
+The section 5.1 reasoning is what macro moves back up on, so it stays in place.
+Macro was shown unaffordable, not wrong, and those have different remedies.
+
+**The phase 8 gate now states what a fail on trend alone means.** A pass is a
+pass without qualification. A fail is a verdict on one leg, and the leg with the
+weaker theoretical basis, so it obliges making the macro leg reachable and
+evaluating it before the design is abandoned. This does not weaken the gate: every
+other criterion still binds and nothing is reinterpreted after the fact. It states
+in advance what an untested leg means, for the same reason the criteria are set
+before the paper period starts.
+
+**Rejected: trading macro on the crypto leg to route around the ceiling.** ETH has
+no scheduled release with a published consensus forecast, so the surprise term
+that makes a macro signal measurable does not exist there. The full reasoning is
+in `docs/DECISIONS.md` under rejected options, recorded so it is not revisited.
+
+**The broker minimum lot investigation matters more now, not less.** It is the
+cheapest route to unblocking macro: a smaller minimum widens the stop ceiling at
+unchanged capital. Still open, and it is reported when it is done.
 
 ### Not a decision yet: unchanged snapshot repeats become tick rows
 

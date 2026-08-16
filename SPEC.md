@@ -2,9 +2,12 @@
 
 **Status:** Living document. Authoritative.
 **Owner:** Alex (director). Implementation delegated to Claude Code sessions.
-**Last structural revision:** End of phase 1. Forex venue changed from OANDA to
-cTrader; capital, instrument universe, retention, price component, and position
-model decisions recorded in sections 3.3, 4.0, and 6.
+**Last structural revision:** 2026-08-17, during phase 2. Section 6.1 added,
+making capital independence a requirement. Phases 4a and 4b reordered so that
+trend precedes macro events, with the original rationale preserved in section 5.1
+and the conditions for reversing it stated there. Phase 8 gate amended twice: paper
+capital must match intended live capital, and a fail on the trend leg alone is not
+a verdict on the design.
 
 ---
 
@@ -314,7 +317,38 @@ forecast against which the actual release can be measured as a surprise, and
 their price impact on foreign exchange is well documented and measurable. They
 give a testable signal. Headlines give a research problem.
 
+**That reasoning is correct and is not withdrawn. It is currently unreachable,
+and the build order is reversed for now.** Trend is phase 4a and macro events are
+phase 4b, decided 2026-08-17, for two reasons that are worth keeping separate.
+
+**Readiness, which is the larger reason.** Trend runs on data the system already
+records and can be walk-forward tested the day the backtest engine exists. Macro
+needs a paid economic calendar API that has not been purchased and a
+surprise-to-direction mapping derived from history that has not been collected.
+Trend is readier regardless of anything to do with capital.
+
+**Capital, which is the reason that can change.** At 200 USD with a 1000 unit
+venue minimum, the per-trade risk budget caps the stop at roughly 20 pips on a
+USD quoted pair. That is inside an intraday trend stop and outside what a
+high-importance release routinely moves, so the macro leg cannot be traded at its
+natural stop distance at this capital. See section 6.1: the constraint is
+arithmetic, and it moves when capital or the venue minimum moves.
+
+**If capital rises or a venue with a smaller minimum lot is adopted, macro moves
+back up the order.** The rationale above is what it moves back on, which is why
+it stays written here rather than being replaced. Nothing about macro being the
+better first signal has been shown wrong; it has been shown unaffordable, and
+those are different findings with different remedies.
+
+**Trading macro events on the crypto leg instead is rejected, and not for capital
+reasons.** ETH has no scheduled release with a published consensus forecast, so
+the surprise term that makes a macro signal measurable does not exist there. What
+would be built is a differently-named strategy sharing none of the property that
+justified this one. Recorded as rejected so it is not revisited.
+
 ### 5.2 Macro event signals
+
+Phase 4b. See section 5.1 for why this is no longer built first.
 
 Signal derives from the surprise, meaning the deviation of the actual release
 from consensus, normalized by the historical distribution of surprises for
@@ -328,6 +362,8 @@ spread-widening window immediately following one.
 
 ### 5.3 Trend signals
 
+Phase 4a.
+
 Standard technical trend estimation on multiple timeframes. Specific indicator
 selection is deferred to the backtest phase and must be chosen by out-of-sample
 performance, not by preference. Any indicator set adopted must survive
@@ -335,7 +371,7 @@ walk-forward validation.
 
 ### 5.4 News signals
 
-Deferred until phase 4b and explicitly optional. If headline processing cannot
+Deferred until phase 4b, alongside macro events, and explicitly optional. If headline processing cannot
 be shown to add out-of-sample edge over the macro and trend layers, it does not
 ship. Sentiment scoring that looks plausible but does not improve the equity
 curve is decoration.
@@ -528,21 +564,29 @@ result line for every crypto run, gross and net, per section 5.5. Look-ahead
 bias tested for explicitly, including a deliberate look-ahead injection that
 the harness must detect. Reports include confidence intervals.
 
-### Phase 4a: Macro event signals
+### Phase 4a: Trend signals
+Trend estimation on multiple timeframes, indicator selection by out-of-sample
+performance. Runs on data the system already records, which is why it is first;
+see section 5.1 for the reordering and what would reverse it.
+
+*Exit criteria:* Walk-forward results with parameter counts declared. Any
+indicator set adopted must survive walk-forward validation on out-of-sample
+windows. Results reported with confidence intervals.
+
+### Phase 4b: Macro event signals and optional news layer
 Economic calendar ingestion, surprise computation, event-to-direction mapping
-derived from history, blackout window logic.
+derived from history, blackout window logic. Headline ingestion and scoring only
+if it demonstrably adds edge.
+
+Two things gate the start of this phase rather than its exit: an economic
+calendar API has to be purchased, and the stop ceiling at the account's capital
+has to admit a macro-width stop. Neither is a code problem. See section 5.1.
 
 *Exit criteria:* Calendar coverage verified against an independent source.
 Surprise calculation validated on historical releases. Out-of-sample results
-reported honestly, including if the edge is absent.
-
-### Phase 4b: Trend signals and optional news layer
-Trend estimation, indicator selection by out-of-sample performance. Headline
-ingestion and scoring only if it demonstrably adds edge.
-
-*Exit criteria:* Walk-forward results with parameter counts declared. News
-layer ships only if it improves out-of-sample net performance; otherwise it is
-cut and that decision is recorded.
+reported honestly, including if the edge is absent. News layer ships only if it
+improves out-of-sample net performance; otherwise it is cut and that decision is
+recorded.
 
 ### Phase 5: Risk engine and position management
 Full risk framework as specified in section 6. Kill switch. Reconciliation
@@ -599,6 +643,29 @@ Deployment requires all of the following:
 If the criteria are not met, the outcome is redesign or termination. Extending
 the paper period to search for a favorable window is not permitted, because
 that is data mining the go decision itself.
+
+**What a fail means when only the trend leg exists.** The reorder in section 5.1
+makes it possible to arrive here with trend built and macro not. If so, the gate
+is deciding on the leg with the weaker theoretical basis: trend is an empirical
+regularity selected by out-of-sample performance, whereas the macro leg rests on
+a measurable surprise term with a documented price impact, which is why it was
+originally to be built first.
+
+A pass on trend alone is a pass, with no qualification. The evidence is the
+evidence.
+
+A fail on trend alone is **not a verdict on the design**. It is a verdict on one
+leg, and the leg that was expected to be weaker. Terminating the project on it
+would discard a hypothesis that has never been tested. So a fail in that
+situation obliges the director to make the macro leg reachable, by capital, by
+venue minimum, or by calendar purchase, and evaluate it before the design is
+abandoned. Redesign and termination remain available afterwards, on evidence
+that covers both legs.
+
+This does not weaken the gate. Every other criterion still binds, and no result
+is reinterpreted after the fact. It states in advance what an untested leg means
+for the conclusion, which is the same reason the criteria themselves are set
+before the paper period begins.
 
 ### Phase 9: Live deployment
 Minimum viable capital. Production infrastructure with monitoring and alerting.

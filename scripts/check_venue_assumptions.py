@@ -86,7 +86,7 @@ REFERENCE_STOPS_IN_PIPS: Final = (
 )
 """Stop distances typical of each strategy class, as **declared assumptions**.
 
-These are not measurements and must not be read as any. Phase 4a ingests the economic
+These are not measurements and must not be read as any. Phase 4b ingests the economic
 calendar and measures what high importance releases actually move, at which point this
 comparison becomes evidence and these figures are replaced. They are here now because a
 stop ceiling reported without anything to compare it against leaves the operator to
@@ -335,12 +335,12 @@ def print_strategy_implication(
     the account can still do, which is what an operator actually needs.
 
     The reference distances are declared assumptions, not measurements, and are labelled
-    as such in the output. Phase 4a ingests the economic calendar and measures what
+    as such in the output. Phase 4b ingests the economic calendar and measures what
     releases actually move, at which point this becomes evidence and these figures are
     replaced.
     """
     print("=== strategy implication ===")
-    print("Reference stop distances below are ASSUMED, pending the phase 4a measurement.")
+    print("Reference stop distances below are ASSUMED, pending the phase 4b measurement.")
     print()
     for name, instrument in sorted(instruments.items()):
         price = prices.get(name)

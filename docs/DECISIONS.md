@@ -481,11 +481,59 @@ ceiling admits, because SPEC 6.1 requires the implication rather than only the
 verdict. The reference stop distances it compares against are **assumptions, not
 measurements**, and the output says so on every run.
 
-Phase 4a ingests the economic calendar and measures what high importance releases
+Phase 4b ingests the economic calendar and measures what high importance releases
 actually move. At that point the comparison becomes evidence and the assumed
 figures are replaced. Stating them as assumptions now is better than leaving the
 operator to infer the consequence from an exclusion list, and better than quietly
 presenting a guess as a finding.
+
+### Trend becomes phase 4a and macro events phase 4b
+
+Directed by the director on 2026-08-17. Recorded in `SPEC.md` sections 5.1 and 8.
+
+Two reasons, deliberately kept separate because only one of them can change.
+
+**Readiness, the larger reason.** Trend runs on data already being recorded and
+can be walk-forward tested as soon as the backtest engine exists. Macro needs a
+paid economic calendar API that has not been purchased, and a surprise to
+direction mapping derived from history that has not been collected. Trend is
+readier regardless of capital.
+
+**Capital, the reason that can change.** At 200 USD against a 1000 unit venue
+minimum the stop ceiling is about 20 pips on a USD quoted pair, which is inside an
+intraday trend stop and outside what a high importance release routinely moves.
+
+The section 5.1 rationale for building macro first was **not deleted and is not
+withdrawn**. Nothing about it has been shown wrong; it has been shown unaffordable,
+and those are different findings with different remedies. If capital rises or a
+venue with a smaller minimum lot is adopted, macro moves back up the order and
+that rationale is what it moves back on.
+
+The phase 8 gate now states what a fail means when only the trend leg exists: a
+pass is a pass, but a fail is a verdict on one leg rather than on the design, and
+the macro leg has to be made reachable and evaluated before the design is
+abandoned.
+
+---
+
+## Rejected, with the reason, so they are not revisited
+
+### Trading macro events on the crypto leg to route around the stop ceiling
+
+Rejected by the director on 2026-08-17.
+
+The proposal was tempting for arithmetic reasons: the ETH stop ceiling is 10.6
+percent against forex's 0.17 percent, so a macro width stop fits easily there.
+
+It is a category error. ETH has no scheduled release with a published consensus
+forecast, and the surprise term, meaning the deviation of an actual release from
+consensus, is the entire mechanism that makes a macro signal measurable and
+testable. Without it what would be built is a differently named strategy sharing
+none of the property that justified this one, evaluated as though it were evidence
+about the macro hypothesis.
+
+The stop ceiling is a constraint on where macro can be traded. It is not a reason
+to redefine what macro means.
 
 ---
 
