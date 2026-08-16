@@ -4,8 +4,10 @@ Companion to `SPEC.md`. This file is updated as work completes. `SPEC.md` is
 not modified except by explicit direction from the director.
 
 **Current phase:** 2, Market data
-**Status:** in progress. Phase 1 is complete and accepted; its record is kept
-below unchanged.
+**Status:** in progress, and CI is red on purpose. The failing run is diagnosed
+but not fixed, and is the first task of the next session: see "Start here" in
+the phase 2 section. Phase 1 is complete and accepted; its record is kept below
+unchanged.
 
 ---
 
@@ -282,7 +284,65 @@ Two items remain open for phase 2:
 
 ## Phase 2: Market data
 
-**Status:** in progress.
+**Status:** in progress. Written to be read cold. Everything a session needs to
+resume is in this section; nothing depends on remembering a conversation.
+
+### Start here: the next session's first task
+
+**CI is failing, and it must be diagnosed before it is fixed.**
+
+```
+verify: /metrics did not expose tradingsys_build_info
+Error: Process completed with exit code 1
+```
+
+Run 31939779488, commit `aa3e501`, 2026-08-16T09:44Z. Everything before that
+step passed: the fresh provision from empty volumes, both migrations base to
+head, 1081 unit and 70 integration tests, and a full stack reporting healthy.
+The failing step is the endpoint probe at the end of `scripts/verify.sh`,
+around line 258, which greps `/metrics` for `^tradingsys_build_info`. The
+series is registered in `src/tradingsys/observability/metrics.py` line 114.
+
+Two things make this non-trivial, and both must be settled before any code
+changes.
+
+**1. Establish whether this is a regression or a race, first.** The same script
+passed in 2 minutes 19 seconds on the previous commit, `e01e36d`. One piece of
+evidence is already in hand and points hard at a race: `aa3e501` changed
+`PROGRESS.md` and nothing else, 83 insertions in one markdown file, no
+application code, no configuration, no Dockerfile. A code regression is
+therefore close to impossible, and the timing in the log is suggestive: the app
+container started at 09:44:49.49, the script reported ready after 2 seconds,
+and the metrics probe ran at 09:44:51.94, roughly 2.4 seconds after start.
+
+That is a pointer, not a conclusion. It has not been proven, and the run has
+not been repeated. Do that first.
+
+**If it is a race, making the probe more patient is the wrong fix.** A metric
+that is sometimes absent after the application has reported ready means
+readiness is lying, and that is the defect. Readiness exists to answer one
+question, whether this process is prepared to be used, and a process whose
+metrics are not yet exposed is not prepared to be scraped. Adding a retry loop
+to the probe would silence the symptom, keep the false readiness signal, and
+leave Prometheus free to scrape a target that has just declared itself ready
+and get nothing back.
+
+**2. `/health` returned `"checks":[]` on the same run, while `/ready` reported
+database and redis both passing.** The empty list is intended: see
+`src/tradingsys/observability/server.py` line 89, where liveness returns an
+empty report when no liveness checks are registered, and the docstring at line
+84 explains why. Liveness must not depend on anything external, or a database
+blip restarts a perfectly healthy process. That is the standard split and it is
+deliberate.
+
+The director's concern is still live and is not answered by the above: an
+endpoint that asserts nothing reports healthy through an outage, and gets
+trusted for more than it checks. What `/health` currently asserts is real but
+narrow: the process is running, the event loop is turning, and the server can
+accept a connection and serve a response. What it does not assert is any
+internal invariant, and the docstring already anticipates registering one, such
+as a stalled event loop detector. Whether that is worth adding is a decision
+for the director, not a defect to fix silently.
 
 | Task | Status | Notes |
 |---|---|---|
@@ -294,10 +354,49 @@ Two items remain open for phase 2:
 | Quote recorder into the tick table | Complete | Batched, retried, flushed on shutdown, tagged with its source |
 | Instrument eligibility screen | Complete | Configurable maximum deviation from intended risk, evaluated against live metadata |
 | Funding drag measurement | Complete | Reported below |
-| cTrader adapter | Not started | |
-| Instrument registry from venue metadata | Not started | |
-| Resumable Dukascopy backfill | Not started | |
-| 72 hour continuous ingestion run | Not started | Begins once the adapters and the registry are working |
+| cTrader adapter | Not started | Next build after the CI diagnosis |
+| Instrument registry from venue metadata | Not started | Blocked on the cTrader adapter for the forex half |
+| Resumable Dukascopy backfill | Not started | Reader and gap detector are done; the runner over `backfill_hours` is not |
+| 72 hour continuous ingestion run | Not started | Begins once the adapters and the registry are working, and is reported before it starts |
+
+### Outstanding work, in the order it should be done
+
+1. **Diagnose the CI failure.** See the section above. Nothing else should be
+   built on top of a pipeline whose result is not trusted.
+2. **cTrader adapter.** Protobuf over TLS to port 5035, application auth, then
+   account auth, then heartbeat. Rotating refresh tokens. Symbol metadata: pip
+   position, digits, minimum volume, volume step, swap rates and the charging
+   convention. The account's `isLive` flag must be asserted against the
+   configured environment, so a demo account cannot be pointed at a live
+   endpoint or the reverse.
+3. **Instrument registry from venue metadata**, then the sizing deliverable the
+   director asked for: minimum position size, tick value, and whether 1 percent
+   of a 200 USD account produces a viable size, for all six instruments. The
+   crypto half is already measured and is in this file. The forex half needs
+   the adapter above. Where 1 percent does not reach a viable size, the
+   instrument is excluded and the exclusion is reported; the machinery for that
+   decision exists in `src/tradingsys/risk/eligibility.py`.
+4. **Resumable Dukascopy backfill** over the `backfill_hours` table from
+   migration 0002. Concurrency capped at 3, retries with backoff. An hour that
+   fails after its retries is recorded as failed and retried later, never
+   skipped and never silently treated as complete.
+5. **Weekday crypto rate**, then set crypto retention. The capture is scheduled;
+   see the section on it below.
+6. **72 hour continuous ingestion run.** Report to the director when the
+   adapters and the registry work, before starting it.
+
+### Where the phase 2 code lives
+
+| Concern | Module |
+|---|---|
+| Gap detection | `src/tradingsys/marketdata/gaps.py`, with `TradingSchedule.open_intervals` in `src/tradingsys/core/schedule.py` |
+| Dukascopy reader | `src/tradingsys/marketdata/dukascopy.py` |
+| Quote recorder | `src/tradingsys/marketdata/recorder.py` |
+| Bybit metadata, REST, stream | `src/tradingsys/venues/bybit/{instruments,rest,book,stream}.py` |
+| Shared request limiter | `src/tradingsys/venues/ratelimit.py` |
+| Eligibility screen | `src/tradingsys/risk/eligibility.py` |
+| Exact float32 conversion | `from_binary32` in `src/tradingsys/core/numeric.py` |
+| Recorded venue fixtures | `tests/venues/bybit/data/`, `tests/marketdata/data/` |
 
 ### Decisions taken during phase 2
 
@@ -336,6 +435,104 @@ Bybit publishes no historical quote data at all: the public archives carry
 trades only, so crypto spread history begins when we start recording. BTC is
 also the reference asset for the regime and correlation work in phase 4. A
 trading exclusion is not a reason to lose the data.
+
+**`SPEC.md` gained section 5.5, a holding period constraint on the crypto leg.**
+Directed on 2026-08-16 after the funding measurement below. This is the only
+structural change to the specification made this session, and it is a
+constraint rather than a note: every crypto strategy declares a maximum holding
+period whose implied funding drag is a stated, bounded fraction of its expected
+edge, tight stops paired with multi-day holds are rejected at design time
+because halving the stop doubles the notional carried per unit of risk, and
+phase 3 reports funding as its own result line for every crypto backtest,
+gross and net. A crypto strategy profitable only when funding is ignored is not
+profitable. The phase 3 exit criteria in section 8 were updated to match.
+
+**USDT is not treated as USD.** The eligibility screen refuses to convert
+between an instrument's quote currency and the account currency without an
+explicit rate, so every Bybit calculation states the rate it used. The peg
+holding is a market observation, not an identity, and the same assumption on a
+JPY quoted forex pair would be wrong by a factor of about 150. This surfaced
+while writing the eligibility tests, which is why it is recorded as a decision
+rather than left as an implementation detail.
+
+**Every venue message currently becomes a tick row, including unchanged
+repeats.** This is the present behaviour rather than a decision, and it needs
+one. Bybit documents that a level 1 topic repeats its snapshot with the *same*
+`u` when nothing has changed for three seconds, and `BookState.apply` emits a
+quote for each such message. Storage deduplicates on instrument, source, and
+timestamp, and a repeat carries a new timestamp, so it lands as a new row: up
+to 28,800 rows per instrument per day carrying no information during a quiet
+market.
+
+The detection rule is exact and needs no heuristic, since an unchanged repeat
+reuses the update id. Suppressing them is not done yet because it interacts
+with the retention question that the weekday capture is meant to settle, and
+because the argument for keeping them is not empty: a row per three seconds is
+also evidence the feed was alive. That evidence already exists in the ping, the
+receive deadline, and the recorder counters, so the likely answer is to
+suppress and rely on those, but it is the director's call and it should be
+taken with the measured row counts in hand rather than before them.
+
+### Defects found this session, with their diagnoses
+
+Recorded because the diagnosis is worth more than the fix. Three were found by
+writing tests, and the fourth by pushing to a remote for the first time.
+
+**1. The rate limiter livelocked, inside a lock.** The first implementation of
+`RateLimiter.acquire` computed how many tokens were missing, slept for exactly
+that long, then re-measured the clock and checked again. The refill is
+`(now - updated) * rate` in binary floating point, so the recomputed balance
+can land a fraction of an ulp below the requested cost. The next wait is then
+a few nanoseconds, and the one after that smaller still, until the delay is too
+small to change the clock at all and the loop spins forever holding the
+`asyncio.Lock`. Two tests written before the fix did not fail, they hung, which
+is why this is worth remembering: a livelock does not report itself. The fix is
+to reserve the tokens against the instant they will exist rather than
+re-measuring, which makes progress arithmetic rather than hopeful and keeps the
+sustained rate exact. `TestProgressUnderFloatingPointRefill` in
+`tests/venues/test_ratelimit.py` covers rates whose intervals are not
+representable in binary.
+
+**2. The stream's reconnect catch tuple omitted the only exception that
+matters.** It caught `(VenueConnectivityError, VenueResponseError, OSError,
+TimeoutError)`, which reads as careful and comprehensive. The `websockets`
+library signals a dropped connection with its own exception type, which does
+not inherit from `OSError`, so the recorder would have exited on the first
+disconnection rather than reconnecting, on a market that never closes and has
+no historical quote source to backfill from. Found because the test socket
+raises a custom exception rather than a real one, which is the case a
+handwritten scripted double covers and a mock of the real library would have
+hidden. It now catches `Exception`, counts it, and keeps the type and message
+in `StreamStats.last_error`. `CancelledError` is a `BaseException` and still
+propagates, so shutdown is unaffected.
+
+**3. A nanosecond epoch divided in a float.** `BybitRestClient.server_time`
+computed `nanoseconds / 1_000_000_000` as a float. A double has 53 bits of
+mantissa and a nanosecond epoch needs about 61, so the low digits were being
+discarded silently and the value was wrong by a variable sub-microsecond
+amount. Now integer `divmod`, with the remainder truncated to microseconds
+rather than rounded, so the recorded instant never lands after the instant the
+venue reported. The same class of error is why prices are parsed from the
+venue's decimal strings and never from JSON numbers.
+
+**4. CI existed and had never run once.** The worst of the four, because it was
+counted as coverage. The workflow triggered on pushes to `main`, and `main` is
+still the phase 1 commit, which has no `.github/` directory at all: the
+workflow file was added later, on the phase branch. So a push to the branch
+where the work happens matched no trigger, and a push to `main` would have
+found no workflow to run. From phase 1 until the remote existed, every claim
+about CI enforcing anything was untrue, and nothing revealed that, because a
+pipeline that never runs produces no red. The filter was wrong in principle
+too: phase branches live for days, so a check that fires only at merge time
+reports on work finished a week earlier. The trigger is now every branch, and
+GitHub reads the workflow from the branch being pushed, so each branch is
+checked against its own pipeline. Verified by observing an actual run complete,
+not by reading the YAML.
+
+The lesson worth carrying: the first three were found by tests that exercised
+the real failure shape, and the fourth was invisible to every test in the
+repository because it was a fact about the world outside it. Anything asserted
+about infrastructure needs to be observed happening at least once.
 
 ### Funding drag on a 200 USD account
 
@@ -415,27 +612,23 @@ account is a demo. The push went ahead on that basis. The historical commits
 still contain it in the test files, which is only worth rewriting if this
 repository ever stops being private.
 
-### CI runs on every branch, and would not have run at all
+### CI now runs, and is currently red
 
-The first thing the remote exposed was that the workflow would never have
-fired. It triggered on pushes to `main`, and `main` is still the phase 1
-commit, which has no `.github/` directory: the workflow file itself was added
-later, on the phase branch. A push to the phase branch matched no trigger, and
-a push to `main` would have found no workflow.
+The workflow had never executed once before this session. That is recorded as
+defect 4 above, with its diagnosis, because a check that is counted as coverage
+and has never run is worse than no check.
 
-The filter was also wrong in principle here. Phase branches live for days, so a
-check that only fires at merge time reports on work finished a week earlier.
-The trigger is now every branch. GitHub reads the workflow from the branch being
-pushed, so each branch is checked against its own pipeline.
+It runs on every branch now, and two runs exist. `e01e36d` passed in 2 minutes
+19 seconds. `aa3e501` failed on the metrics probe, and that failure is the
+first task of the next session, described at the top of this section. **CI is
+red as of the end of this session, deliberately left that way**: the director
+asked for the failure to be captured rather than fixed, so that whether it is a
+regression or a race is established before anything is changed.
 
-Verified live: the first push produced a run that completed successfully in 2
-minutes 19 seconds, executing `scripts/verify.sh --fresh --down`, which
-provisions a database from an empty volume and applies every migration from
-base to head before running the suites.
-
-Merging the phase branch into `main` would have been the other way to make CI
-fire, and it is not taken here because it would publish in-progress phase 2
-work to the default branch, which is the director's call.
+**The phase branch is not merged into `main`, and merging it is not a way to
+make CI fire.** Phase branches merge when the phase completes and its exit
+criteria are met, not to satisfy tooling. `main` therefore stays at the phase 1
+commit until phase 2 is done and accepted.
 
 ### Commits are not GPG signed, deliberately
 
@@ -460,6 +653,8 @@ to someone.
 |---|---|
 | Dukascopy volume units | The feed does not document them. To be confirmed against a published definition, or cross checked against Pepperstone over an overlapping window with the ratio reported |
 | Weekday crypto tick rate | Capture scheduled, see below. Crypto retention is not set until it lands. A sampling scheme, if one turns out to be warranted, comes with its statistical justification rather than just a rate |
+| Unchanged snapshot repeats stored as rows | Described under the phase 2 decisions. Decide with the measured row counts in hand, not before |
+| `/health` asserts no internal invariant | Intended, but the director asked whether it should stay that way. See the first task of the next session |
 
 ### The weekday crypto capture is scheduled
 
@@ -478,9 +673,10 @@ uv run python scripts/measure_crypto_rate.py --hours 24 \
   --out /var/tmp/tradingsys/crypto-rate-weekday.json
 ```
 
-**The instrument ratio needs the full day, not a sample.** The director was
-right to flag ETH at more than twice BTC as worth checking rather than
-assuming, and short samples do not agree with each other:
+**None of the crypto rate samples taken so far may be used to size retention.**
+There are three, all from Sunday 2026-08-16, and they contradict each other by
+a factor of four on the instrument ratio. They are recorded to show that the
+question is open, not to be averaged, interpolated, or picked from:
 
 | Sample | BTC quotes/s | ETH quotes/s | ETH as a multiple of BTC |
 |---|---|---|---|
@@ -488,14 +684,17 @@ assuming, and short samples do not agree with each other:
 | Sunday 2026-08-16, 18 seconds | 7.7 | 5.2 | 0.68 |
 | Sunday 2026-08-16, 4 minutes | 8.1 | 4.8 | 0.60 |
 
-Two independent facts say the 2.4 figure should not be carried forward as a
-property of the instruments. Bybit's own 24 hour turnover has BTC ahead of ETH,
-510M against 367M USDT, so ETH is not the busier market by value. And BTC's
-tick is finer relative to its price, 0.16 basis points against 0.53, which
-means BTC's top of book has more distinct prices to move between, not fewer.
-Both point away from ETH sustaining more quote updates. The hourly breakdown
-from the 24 hour capture will settle whether the Sunday hour was a burst, and
-storage is sized from that rather than from any of the rows above.
+ETH at 2.4 times BTC in one hour and 0.6 times BTC twenty minutes later cannot
+both be a property of the instruments, so at most one of them is, and probably
+neither. Two independent facts point away from the largest figure. Bybit's own
+24 hour turnover has BTC ahead of ETH, 510M against 367M USDT, so ETH is not
+the busier market by value. And BTC's tick is finer relative to its price, 0.16
+basis points against 0.53, so BTC's top of book has more distinct prices to
+move between, which should produce more updates rather than fewer.
+
+Crypto retention stays unset until the 24 hour hourly breakdown exists. If that
+capture shows a rate high enough that sampling has to be considered, the
+director wants the scheme and its statistical justification, not a rate.
 
 ---
 
