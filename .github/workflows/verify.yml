@@ -10,8 +10,12 @@
 name: verify
 
 on:
+  # Every branch, not only main. Work happens on phase branches and sits there for
+  # days, so a filter of [main] means the pipeline verifies nothing until a phase is
+  # merged, which is exactly when it is too late to be useful. GitHub reads this file
+  # from the branch being pushed, so a branch that has not caught up runs its own
+  # version, which is the correct behaviour for a check on that branch's code.
   push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
