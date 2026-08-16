@@ -391,6 +391,52 @@ rather than treated as a constant, and the phase 4 backtester must charge
 funding on the actual settlement schedule. The funding anchor is already read
 from the venue for exactly that reason.
 
+### The repository has a remote
+
+`https://github.com/alexhaya4/tradingsys`, private, created 2026-08-16. Both
+branches pushed: `main` at the phase 1 commit, `phase-2-market-data` carrying
+everything since. Verified through the API rather than assumed from the create
+command: `private: true`, `visibility: private`, both remote branch heads equal
+to the local ones, and `.env` returning 404 on the contents endpoint.
+
+**History was scanned before the first push, not after.** The repository was
+initialised after `.env` already existed, so absence had to be checked rather
+than assumed. Every value in `.env` was searched for across every blob in every
+commit and across every commit message, plus patterns for GitHub tokens, AWS
+keys, Slack tokens, and PEM private key headers. Result: no credential value
+appears anywhere in the history.
+
+One thing did turn up and is recorded rather than buried. The Pepperstone demo
+account number appears in `SPEC.md`, where the director put it deliberately,
+and appeared in two config test fixtures, which now use a placeholder of the
+same shape. It is an identifier rather than a credential: nothing authenticates
+with it, the configuration model classifies `account_id` as non-secret, and the
+account is a demo. The push went ahead on that basis. The historical commits
+still contain it in the test files, which is only worth rewriting if this
+repository ever stops being private.
+
+### CI runs on every branch, and would not have run at all
+
+The first thing the remote exposed was that the workflow would never have
+fired. It triggered on pushes to `main`, and `main` is still the phase 1
+commit, which has no `.github/` directory: the workflow file itself was added
+later, on the phase branch. A push to the phase branch matched no trigger, and
+a push to `main` would have found no workflow.
+
+The filter was also wrong in principle here. Phase branches live for days, so a
+check that only fires at merge time reports on work finished a week earlier.
+The trigger is now every branch. GitHub reads the workflow from the branch being
+pushed, so each branch is checked against its own pipeline.
+
+Verified live: the first push produced a run that completed successfully in 2
+minutes 19 seconds, executing `scripts/verify.sh --fresh --down`, which
+provisions a database from an empty volume and applies every migration from
+base to head before running the suites.
+
+Merging the phase branch into `main` would have been the other way to make CI
+fire, and it is not taken here because it would publish in-progress phase 2
+work to the default branch, which is the director's call.
+
 ### Commits are not GPG signed, deliberately
 
 Decided by the director on 2026-08-16, recorded here so it is not reopened
@@ -413,7 +459,43 @@ to someone.
 | Item | Why it matters |
 |---|---|
 | Dukascopy volume units | The feed does not document them. To be confirmed against a published definition, or cross checked against Pepperstone over an overlapping window with the ratio reported |
-| Weekday crypto tick rate | Storage sizing for crypto was deferred to a weekday measurement. A sampling scheme, if one turns out to be warranted, comes with its statistical justification rather than just a rate |
+| Weekday crypto tick rate | Capture scheduled, see below. Crypto retention is not set until it lands. A sampling scheme, if one turns out to be warranted, comes with its statistical justification rather than just a rate |
+
+### The weekday crypto capture is scheduled
+
+`scripts/measure_crypto_rate.py` counts top of book updates and trades per UTC
+hour rather than reporting a single mean, because a busy hour extrapolated to a
+day overstates storage and a quiet one understates it, and both look like a
+measurement. A detached process is waiting to start it at 00:00 UTC on Monday
+2026-08-17 for 24 hours, writing
+`/var/tmp/tradingsys/crypto-rate-weekday.json`.
+
+That process does not survive a host restart, since WSL2 stops with it. If the
+file is absent after Tuesday, relaunch with:
+
+```bash
+uv run python scripts/measure_crypto_rate.py --hours 24 \
+  --out /var/tmp/tradingsys/crypto-rate-weekday.json
+```
+
+**The instrument ratio needs the full day, not a sample.** The director was
+right to flag ETH at more than twice BTC as worth checking rather than
+assuming, and short samples do not agree with each other:
+
+| Sample | BTC quotes/s | ETH quotes/s | ETH as a multiple of BTC |
+|---|---|---|---|
+| Sunday 2026-08-16, 60 minutes | 6.2 | 14.8 | 2.4 |
+| Sunday 2026-08-16, 18 seconds | 7.7 | 5.2 | 0.68 |
+| Sunday 2026-08-16, 4 minutes | 8.1 | 4.8 | 0.60 |
+
+Two independent facts say the 2.4 figure should not be carried forward as a
+property of the instruments. Bybit's own 24 hour turnover has BTC ahead of ETH,
+510M against 367M USDT, so ETH is not the busier market by value. And BTC's
+tick is finer relative to its price, 0.16 basis points against 0.53, which
+means BTC's top of book has more distinct prices to move between, not fewer.
+Both point away from ETH sustaining more quote updates. The hourly breakdown
+from the 24 hour capture will settle whether the Sunday hour was a burst, and
+storage is sized from that rather than from any of the rows above.
 
 ---
 
