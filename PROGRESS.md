@@ -367,7 +367,8 @@ to be brought with evidence rather than resolved quietly.
 | Instrument eligibility screen | Complete | Configurable maximum deviation from intended risk, evaluated against live metadata |
 | Funding drag measurement | Complete | Reported below |
 | CI probe diagnosis and repair | Complete | Race, not regression, proven by re-run. Cause unexplained; probe repaired so a recurrence is diagnosable from the log |
-| cTrader adapter | In progress | Started 2026-08-16 after the CI diagnosis |
+| cTrader adapter: transport | Complete | TLS, framing, handshake, live flag assertion, heartbeat. Verified against the real demo venue |
+| cTrader adapter: symbol metadata | Not started | Next unit: pip position, digits, minimum volume, volume step, swap rates and the charging convention |
 | Instrument registry from venue metadata | Not started | Blocked on the cTrader adapter for the forex half |
 | Resumable Dukascopy backfill | Not started | Reader and gap detector are done; the runner over `backfill_hours` is not |
 | 72 hour continuous ingestion run | Not started | Begins once the adapters and the registry are working, and is reported before it starts |
@@ -376,12 +377,10 @@ to be brought with evidence rather than resolved quietly.
 
 1. ~~**Diagnose the CI failure.**~~ Done 2026-08-16. Race not regression, cause
    unexplained, probe repaired. See the section above.
-2. **cTrader adapter.** Protobuf over TLS to port 5035, application auth, then
-   account auth, then heartbeat. Rotating refresh tokens. Symbol metadata: pip
-   position, digits, minimum volume, volume step, swap rates and the charging
-   convention. The account's `isLive` flag must be asserted against the
-   configured environment, so a demo account cannot be pointed at a live
-   endpoint or the reverse.
+2. **cTrader adapter.** Transport done 2026-08-16, see the section below.
+   Remaining: symbol metadata, meaning pip position, digits, minimum volume,
+   volume step, swap rates and the charging convention. Rotating refresh tokens
+   are modelled in configuration but the refresh call itself is not written yet.
 3. **Instrument registry from venue metadata**, then the sizing deliverable the
    director asked for: minimum position size, tick value, and whether 1 percent
    of a 200 USD account produces a viable size, for all six instruments. The
@@ -431,6 +430,55 @@ at 63,035 and ETH at 1,880 USDT:
 
 With three usable sizes, the realised risk on a BTC trade can sit up to 31
 percent away from the 1 percent the risk engine claims to be enforcing.
+
+### The cTrader transport, and what connecting to the venue revealed
+
+**Status as of 2026-08-16T20:00Z: the transport is complete and verified against
+the real demo endpoint.** Rulings are in `docs/DECISIONS.md`; what is recorded
+here is the evidence and the defect that only a real connection could expose.
+
+| Concern | Module |
+|---|---|
+| Vendored schema and generated modules | `src/tradingsys/venues/ctrader/messages/`, provenance in its `__init__.py` |
+| Regeneration | `scripts/generate_ctrader_messages.sh`, verifies sha256 digests before generating |
+| Length prefixed framing and the envelope | `src/tradingsys/venues/ctrader/framing.py` |
+| TLS channel, handshake, heartbeat, death | `src/tradingsys/venues/ctrader/connection.py` |
+| Hand written venue peer for tests | `tests/venues/ctrader/scripted_venue.py` |
+
+**Observed against demo.ctraderapi.com on 2026-08-16**, not inferred:
+
+| Observation | Value |
+|---|---|
+| Handshake | Application auth, account list, live flag assertion, account auth, all completed |
+| Account number 5325402 maps to ctidTraderAccountId | 48268952 |
+| `isLive` for that account | false, matching the practice configuration |
+| Venue heartbeat interval | 30.0s, arrivals at t+30.1, 60.1, 90.2, 120.2, 150.1 |
+| 150s idle on the shipped 95s deadline | still authenticated, no false death |
+
+**The defect that only connecting could find.** `stream_read_timeout_seconds` was
+20 seconds. The venue sends a heartbeat every 30. An idle forex socket carries
+nothing else, which is its normal state over a weekend, so the client would have
+declared every healthy idle connection dead and reconnected in a loop. No unit
+test could have caught it, because the scripted peer sends whatever the test tells
+it to. It is now 95 seconds, which is two missed venue heartbeats plus margin, and
+`tests/venues/ctrader/test_shipped_configuration.py` reads the shipped
+configuration and fails if the deadline is ever brought back under the interval
+the venue actually sends at.
+
+This is the second time the same lesson has paid: anything asserted about the
+world outside the repository has to be observed happening at least once.
+
+**The refusals are tested, and the tests were checked by breaking the code.** Two
+mutations were applied and each was caught by exactly one test: reading an absent
+`isLive` as demo, and logging a heartbeat write failure instead of dying. The
+first mutation logged `ctrader account authenticated ... environment=practice` for
+an account carrying no live flag at all, which is the fail-open the assertion
+exists to prevent.
+
+**Not yet done in this adapter.** Symbol metadata, the refresh token call, and
+reconnection with resynchronisation. The connection currently reports death and
+stops; nothing reconnects it yet. That is deliberate, since reconnection policy
+belongs with the subscription state it has to restore.
 
 ### Not a decision yet: unchanged snapshot repeats become tick rows
 

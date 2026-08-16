@@ -562,6 +562,7 @@ stream_read_timeout_seconds = 20.0
 max_retries = 3
 retry_backoff_seconds = 0.5
 max_requests_per_second = 30.0
+heartbeat_interval_seconds = 10.0
 token_refresh_margin_seconds = 259200.0
 """
 

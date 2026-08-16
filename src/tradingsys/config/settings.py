@@ -281,6 +281,15 @@ class ForexVenueSettings(_Section):
     max_retries: Annotated[int, Field(ge=0)]
     retry_backoff_seconds: PositiveSeconds
     max_requests_per_second: Annotated[float, Field(gt=0)]
+    heartbeat_interval_seconds: PositiveSeconds
+    """How often a heartbeat is sent on the trading socket.
+
+    The venue closes a connection that has been silent for too long, and a heartbeat
+    that cannot be written is how this client learns the socket is gone. It must stay
+    comfortably below both the venue's idle timeout and
+    :attr:`stream_read_timeout_seconds`, or the read deadline fires during normal
+    quiet periods and a healthy connection is declared dead.
+    """
     token_refresh_margin_seconds: PositiveSeconds
     """How long before expiry a refresh is attempted.
 

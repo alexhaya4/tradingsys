@@ -72,10 +72,24 @@ live_api_host = "live.ctraderapi.com"
 api_port = 5035
 token_url = "https://openapi.ctrader.com/apps/token"
 request_timeout_seconds = 10.0
-stream_read_timeout_seconds = 20.0
+# The venue sends its own heartbeat every 30 seconds, measured against
+# demo.ctraderapi.com on 2026-08-16 over a 150 second idle window: gaps of 30.0, 30.1,
+# 30.0, 29.9. An idle forex socket carries nothing else, which is its normal state over
+# a weekend, so this deadline is sized against that interval and not against quote flow.
+# 95 seconds means the connection is declared dead only after two consecutive venue
+# heartbeats have been missed, with five seconds of margin for jitter. The previous
+# value of 20 seconds was shorter than the venue's own heartbeat and would have killed
+# every healthy idle connection.
+stream_read_timeout_seconds = 95.0
 max_retries = 3
 retry_backoff_seconds = 0.5
 max_requests_per_second = 30.0
+# The venue documents that it closes a connection silent for longer than 30 seconds, and
+# sends its own heartbeat so that a client can tell a quiet connection from a dead one.
+# Ten seconds gives two missed heartbeats of margin before the venue's own timeout, and
+# sits well below stream_read_timeout_seconds so that a normal quiet period cannot trip
+# the read deadline and declare a healthy connection dead.
+heartbeat_interval_seconds = 10.0
 # Access tokens last about 30 days. Refreshing three days out leaves room for several
 # retries before the token actually dies, and a dead token needs manual reauthorisation.
 token_refresh_margin_seconds = 259200.0

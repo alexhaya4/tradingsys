@@ -266,6 +266,102 @@ because decisions are permanent and progress is not: rulings kept inside a
 tracker get rewritten when the tracker is rewritten, and a cold session should
 not have to read a long mutable document to find the fixed points.
 
+### The cTrader protobuf schema is vendored at a pinned commit
+
+Decided 2026-08-16.
+
+Upstream is `spotware/openapi-proto-messages`, MIT licensed, pinned at commit
+`3fd8bddfbe0cfc2ecfda079623dc4e498af11e66` dated 2025-11-13. That commit is four
+ahead of upstream's own tag `91`, carrying payload removals and a typo fix in the
+model messages. A commit SHA is pinned rather than a tag because a tag can be
+moved and a SHA cannot.
+
+The four `.proto` files are kept byte identical to upstream and their sha256
+digests are recorded in `scripts/generate_ctrader_messages.sh`, which verifies
+them before generating anything. Vendored code whose upstream version is unknown
+becomes unmaintainable the first time upstream changes, and vendored code that
+has been quietly edited is worse, so the digest check makes both visible.
+
+Generated modules and stubs are committed, so a build needs neither `protoc` nor
+the network. Regeneration is a script rather than a documented command, for the
+same reason `scripts/verify.sh` is: a transcribed command drifts from the one that
+was actually run. The script also rewrites protobuf's bare cross module imports to
+package qualified ones, because upstream's files import each other by bare
+filename and protoc's output cannot otherwise resolve from inside a package. That
+rewrite is part of generation, so committed output is reproducible from the script
+alone.
+
+### Spotware's own Python package is not used
+
+`ctrader-open-api` is built on Twisted, which would put a second event loop beside
+asyncio in a process whose entire architecture is asyncio. The schema is the part
+worth taking from upstream; the transport is not.
+
+### Generated protobuf code is excluded from the linter and not from the type checker
+
+`mypy --strict` passes over the generated modules, using stubs from
+`mypy-protobuf`. They are excluded from `ruff` only, because they are machine
+output: a style fix applied to them would be reverted by the next regeneration,
+and hand editing them would break the guarantee that committed output is
+reproducible from the generation script.
+
+The distinction is deliberate. Excluding generated code from the type check would
+weaken the standard by exception, which is how standards erode. Excluding it from
+the formatter costs nothing, because nobody reads or edits it.
+
+### The account is matched by trader login and used by ctidTraderAccountId
+
+The configured `account_id` is the broker's account number, which the venue
+reports as `traderLogin`. Every request after the handshake is keyed by
+`ctidTraderAccountId`, which is a different number the venue assigns. Confirmed
+against the demo account on 2026-08-16: login 5325402 maps to ctid 48268952.
+
+They are not interchangeable, and the mapping only exists at the venue, so the
+handshake fetches the account list and resolves one to the other rather than
+assuming the configured number is either.
+
+### The live flag assertion fails closed
+
+`isLive` is `optional` in the schema, so an account that never carried the field
+reads as `false` through protobuf's default. Treating that as "demo" would
+authorise an unknown account against a demo configuration, which is the single
+most expensive default this system could take.
+
+The connection therefore refuses when the flag is absent, when it is unreadable,
+and when it disagrees with the configured environment, and it refuses before the
+account authorisation request is sent rather than after. All four refusals are
+tested, and the fail-open mutation was verified to break the test rather than the
+test being assumed to cover it.
+
+### A heartbeat that cannot be sent is connection death
+
+Not a warning to log. A connection whose heartbeat write fails cannot carry an
+order, and every caller has to learn that from the connection rather than from the
+log. The same applies to the read deadline: silence past it kills the connection
+and fails every pending request.
+
+This is the shape of the Bybit stream defect, where a reconnect clause omitted the
+websockets library's own disconnect exception and the recorder would have exited
+on the first disconnection. It is not being rediscovered here.
+
+### The read deadline is sized against the venue's measured heartbeat interval
+
+Measured against demo.ctraderapi.com on 2026-08-16 over a 150 second idle window:
+the venue sends a heartbeat every 30 seconds, arriving at t+30.1, 60.1, 90.2,
+120.2, 150.1, gaps of 30.0, 30.1, 30.0, 29.9.
+
+`stream_read_timeout_seconds` was 20 seconds, inherited from a value chosen for a
+quote stream. An idle forex socket carries nothing but heartbeats, which is its
+normal state over a weekend, so a 20 second deadline would have declared every
+healthy idle connection dead and reconnected in a loop. It is now 95 seconds,
+which declares death only after two consecutive venue heartbeats have been missed.
+
+No unit test could have caught this: the scripted peer sends whatever the test
+tells it to. It was found by connecting to the venue, which is the same lesson the
+CI-never-ran defect taught. The relationship between the two numbers is now
+guarded by a test that reads the shipped configuration, so the deadline cannot be
+tightened back under the interval the venue actually sends at.
+
 ---
 
 ## Decisions that live in `SPEC.md`
