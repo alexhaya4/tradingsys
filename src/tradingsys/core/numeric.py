@@ -19,6 +19,7 @@ from tradingsys.core.errors import DomainError
 __all__ = [
     "ARITHMETIC_PRECISION",
     "Numeric",
+    "decimal_from_double",
     "exact_context",
     "from_binary32",
     "to_decimal",
@@ -124,3 +125,43 @@ def from_binary32(value: float, *, what: str = "value") -> Decimal:
             f"converting it here would record a precision the source never had."
         )
     return Decimal(value)
+
+
+def decimal_from_double(value: float, *, what: str = "value") -> Decimal:
+    """The decimal a venue meant when it published a value as an IEEE-754 double.
+
+    The second and last sanctioned float to Decimal door, and it is deliberately not
+    the same conversion as :func:`from_binary32`. The distinction is what the source
+    intended, not how it was transported.
+
+    :func:`from_binary32` is for a field whose value genuinely *is* binary, such as a
+    Dukascopy tick volume, where the exact expansion is the faithful record and
+    rounding would lose a value that can never be recovered.
+
+    This is for a field the venue means as a decimal number and happens to transport
+    as a double, such as a cTrader swap rate of -1.2 pips. Its exact expansion is
+    -1.1999999999999999555910790149937383830547332763671875, which is not a swap rate
+    anyone quoted, and recording it would invent nineteen digits of precision the
+    broker never published. The shortest decimal that maps back to the identical
+    double is the value that was meant, and Python's ``repr`` produces exactly that.
+
+    Neither conversion is safe in the other's place. Using this one on a binary field
+    discards real precision; using the other on a quoted decimal fabricates it.
+
+    Args:
+        value: A float taken from a protobuf ``double`` or an equivalent field.
+        what: Name of the value, used in error messages.
+
+    Raises:
+        TypeError: ``value`` is not a float, so it did not come from a double field.
+        DomainError: ``value`` is NaN or infinite.
+    """
+    if isinstance(value, bool) or not isinstance(value, float):
+        raise TypeError(
+            f"{what} must be a float taken from a double field, got "
+            f"{type(value).__name__}: {value!r}. Values that are already exact belong "
+            f"in to_decimal."
+        )
+    if not math.isfinite(value):
+        raise DomainError(f"{what} must be finite, got {value!r}")
+    return Decimal(repr(value))

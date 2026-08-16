@@ -79,6 +79,15 @@ class InstrumentStatus(StrEnum):
 
     ACTIVE = "active"
     HALTED = "halted"
+    REDUCE_ONLY = "reduce_only"
+    """Existing positions may be closed, but no new one may be opened.
+
+    Distinct from :attr:`HALTED` because the difference decides whether the kill
+    switch can flatten. Collapsing the two would mean either believing an open
+    position cannot be closed, which stops a flatten that would have succeeded, or
+    believing a closed symbol accepts entries. cTrader publishes this as
+    ``CLOSE_ONLY_MODE`` and Bybit has the same notion.
+    """
     DELISTED = "delisted"
 
 

@@ -362,6 +362,68 @@ CI-never-ran defect taught. The relationship between the two numbers is now
 guarded by a test that reads the shipped configuration, so the deadline cannot be
 tightened back under the interval the venue actually sends at.
 
+### Venue credentials do not go into CI, and venue drift is a known gap
+
+Decided by the director on 2026-08-16.
+
+The value of a periodic liveness check on our API assumptions does not justify
+putting a live trading credential into a third party's secret store, where it is
+reachable by any workflow anyone ever adds to this repository. The same pattern
+would tempt us toward live keys at phase 8, which is when it would cost the most.
+
+The consequence is stated rather than hidden: **CI cannot catch venue drift.** If
+the broker changes a lot size, a swap convention, a symbol name, or the shape of
+its metadata, no pipeline here will notice. The manual control is
+`scripts/check_venue_assumptions.py`, run on the host where the credentials
+already live, and `PROGRESS.md` records that it must be run before each phase
+closes and before any deployment. This is an accepted gap with a control, not an
+oversight.
+
+The script asserts rather than prints. A report nobody reads is not a control, so
+every check either passes or fails the run.
+
+### An unknown protobuf enum value arrives as an absent field, and is refused
+
+A proto2 closed enum drops a value the client does not know into unknown fields,
+so the field reads as its declared default with `HasField` false. For
+`tradingMode` that default is `ENABLED` and for `swapCalculationType` it is
+`PIPS`, which means a venue that introduces a new mode would silently be read as
+tradeable, and a new swap basis silently as pips.
+
+Observed across the live catalogue: the venue sets both fields on every symbol. So
+absence is not a legitimate case, it is exactly the unknown value case, and both
+are refused. Checking for an unrecognised *value* would never fire, which is why
+the check is on presence instead.
+
+### `InstrumentStatus` gained `REDUCE_ONLY`
+
+cTrader publishes `CLOSE_ONLY_MODE` and Bybit has the same notion. Collapsing it
+into `HALTED` would mean either believing an open position cannot be closed, which
+stops a flatten that would have succeeded, or believing a closed symbol accepts
+entries. The difference decides whether the kill switch can act, so it is kept.
+
+### `decimal_from_double` is a second sanctioned float door, and not the same one
+
+`from_binary32` exists for fields whose value genuinely is binary, such as a
+Dukascopy tick volume, where the exact expansion is the faithful record.
+
+cTrader publishes swap rates as protobuf doubles, but the broker quotes them as
+decimals: a swap of -1.2 pips expands to -1.1999999999999999555910790149937 as a
+double, which is not a rate anyone published, and recording it would invent
+nineteen digits of precision. The shortest decimal that maps back to the same
+double is the value that was meant.
+
+Neither conversion is safe in the other's place. Using the double door on a binary
+field discards real precision; using the binary door on a quoted decimal
+fabricates it. Both say so in their docstrings.
+
+### The forex sizing verdict comes from the eligibility screen, not from the report
+
+`scripts/check_venue_assumptions.py` calls `evaluate_eligibility`, the same screen
+the crypto half was measured with, rather than repeating the arithmetic. A report
+that computes eligibility its own way can disagree with the code that enforces it,
+and then neither can be trusted.
+
 ---
 
 ## Decisions that live in `SPEC.md`

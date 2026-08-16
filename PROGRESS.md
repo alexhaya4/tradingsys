@@ -368,7 +368,8 @@ to be brought with evidence rather than resolved quietly.
 | Funding drag measurement | Complete | Reported below |
 | CI probe diagnosis and repair | Complete | Race, not regression, proven by re-run. Cause unexplained; probe repaired so a recurrence is diagnosable from the log |
 | cTrader adapter: transport | Complete | TLS, framing, handshake, live flag assertion, heartbeat. Verified against the real demo venue |
-| cTrader adapter: symbol metadata | Not started | Next unit: pip position, digits, minimum volume, volume step, swap rates and the charging convention |
+| cTrader adapter: symbol metadata | Complete | Digits, pip position, volumes, swap rates and charging convention, trading mode, schedule. Verified against the live catalogue |
+| Sizing deliverable, forex half | Complete | Reported below. All four pairs excluded at a 1 percent stop |
 | Instrument registry from venue metadata | Not started | Blocked on the cTrader adapter for the forex half |
 | Resumable Dukascopy backfill | Not started | Reader and gap detector are done; the runner over `backfill_hours` is not |
 | 72 hour continuous ingestion run | Not started | Begins once the adapters and the registry are working, and is reported before it starts |
@@ -479,6 +480,81 @@ exists to prevent.
 reconnection with resynchronisation. The connection currently reports death and
 stops; nothing reconnects it yet. That is deliberate, since reconnection policy
 belongs with the subscription state it has to restore.
+
+### Venue drift cannot be caught by CI, and the control for it
+
+**Decided by the director on 2026-08-16: no venue credentials in GitHub Actions.**
+The reasoning is in `docs/DECISIONS.md`. What matters operationally is the gap it
+leaves and the control that covers it.
+
+**The gap.** If Pepperstone changes a lot size, a swap convention, a symbol name,
+or the shape of its metadata, no pipeline in this repository will notice. Every
+test here runs against a peer we wrote or a fixture we recorded. CI proves the
+client is self consistent; it proves nothing about the venue.
+
+**The control.** `scripts/check_venue_assumptions.py`, run on the host where the
+credentials already live:
+
+```bash
+set -a && . ./.env && set +a
+uv run python scripts/check_venue_assumptions.py
+```
+
+It asserts rather than prints, and exits non zero on any failure. It covers the
+handshake, the live flag against the configured environment, the trader login to
+ctidTraderAccountId mapping still resolving, the venue heartbeat interval being
+within bounds of the 30 seconds the read deadline is sized against, the connection
+surviving an idle period on the shipped deadline, and the symbol metadata shape
+for every instrument in the universe.
+
+**It must be run before each phase closes and before any deployment.** That is the
+whole of the control. It is not automated and cannot be, so it belongs in the
+phase checklist rather than in a pipeline.
+
+First full run, 2026-08-16: **33 checks, 33 passed, 0 failed.**
+
+### The sizing deliverable
+
+Requested by the director. Measured 2026-08-16 against live venue metadata and
+live prices, using `evaluate_eligibility` from `src/tradingsys/risk/eligibility.py`
+rather than arithmetic repeated in the report.
+
+Account 200 USD, risk 1 percent, so a budget of **2.00 USD per trade**. The verdict
+column is at a 1 percent stop, the same figure the crypto leg was measured at.
+
+| Instrument | Price | Minimum size | Step | Tick | Tick value at minimum | Widest affordable stop | Verdict at a 1 percent stop |
+|---|---|---|---|---|---|---|---|
+| EUR/USD | 1.15692 | 1000 units | 1000 | 0.00001 | 0.01000 USD | 0.173 percent, 20.0 pips | **Excluded**, needs 172.87 units |
+| GBP/USD | 1.35334 | 1000 units | 1000 | 0.00001 | 0.01000 USD | 0.148 percent, 20.0 pips | **Excluded**, needs 147.78 units |
+| AUD/USD | 0.70837 | 1000 units | 1000 | 0.00001 | 0.01000 USD | 0.282 percent, 20.0 pips | **Excluded**, needs 282.34 units |
+| USD/JPY | 159.326 | 1000 units | 1000 | 0.001 | 1.000 JPY, 0.006276 USD | 0.200 percent, 31.9 pips | **Excluded**, needs 200.00 units |
+| ETH/USDT perpetual | 1880 | 0.01 ETH | 0.01 | n/a | n/a | 10.6 percent | **Tradeable**, 10 distinct sizes |
+
+**All four forex pairs are excluded at a 1 percent stop, and the reason is the same
+for each.** The minimum position is 1000 units on every pair, and 2.00 USD of risk
+spread over 1000 units is 0.002 USD per unit. For any USD quoted pair that is
+exactly **20 pips**, whatever the price. A stop wider than that needs a position
+smaller than the venue will accept, and `SPEC.md` section 6 says the answer is to
+exclude the instrument rather than raise the limit.
+
+USD/JPY works out at 0.3187 JPY, about 32 pips, because its risk is priced in JPY
+and converted at 159.326.
+
+**This is not the same finding as the BTC exclusion.** BTC was excluded for
+quantisation, meaning too few distinct sizes within the budget. These are excluded
+for the minimum itself: the smallest position the venue accepts already risks more
+than 2.00 USD at a 1 percent stop.
+
+**What it means, and what it does not.** It does not mean forex is untradeable on
+this account. It means any forex strategy here must use a stop at or inside 20 pips
+on a USD quoted pair, and inside about 32 pips on USD/JPY. That is a tight but not
+unreasonable intraday stop, and it is a strategy design constraint of the same
+kind as SPEC 5.5 imposes on the crypto leg. It is the director's call whether to
+accept that constraint, trade fewer pairs, or revisit at a larger account. Raising
+the risk limit to fit is forbidden by SPEC 6 and is not on the list.
+
+The exclusion re-evaluates on its own: it is arithmetic against live metadata and
+live price, so it changes when the account grows or the broker changes a minimum.
 
 ### Not a decision yet: unchanged snapshot repeats become tick rows
 
