@@ -3,9 +3,9 @@
 Companion to `SPEC.md`. This file is updated as work completes. `SPEC.md` is
 not modified except by explicit direction from the director.
 
-**Current phase:** 1, Foundation
-**Status:** COMPLETE. Every exit criterion met and evidenced below. Phase 2 not
-started and not to be started without direction.
+**Current phase:** 2, Market data
+**Status:** in progress. Phase 1 is complete and accepted; its record is kept
+below unchanged.
 
 ---
 
@@ -280,7 +280,70 @@ Two items remain open for phase 2:
 
 ---
 
-## Phases 2 through 9
+## Phase 2: Market data
+
+**Status:** in progress.
+
+| Task | Status | Notes |
+|---|---|---|
+| Schedule-aware gap detection | Complete | Compares coverage against `TradingSchedule`, so weekends, holidays, and session boundaries are never reported. Both daylight saving transitions pinned |
+| Dukascopy `.bi5` reader | Complete | In house, validated payloads, exact prices and volumes, byte for byte round trip against a recorded hour |
+| Bybit instrument metadata | Complete | Mapped from `instruments-info`, tested against recorded responses |
+| Bybit market data client and WebSocket recorder | In progress | |
+| cTrader adapter | Not started | |
+| Instrument registry from venue metadata | Not started | |
+| Resumable Dukascopy backfill | Not started | |
+| 72 hour continuous ingestion run | Not started | Begins once the adapters and the registry are working |
+
+### Decisions taken during phase 2
+
+**Crypto product: linear perpetuals, not spot.** Decided by the director on
+2026-08-16 after the measurement below. Spot is unleveraged, so at 200 USD of
+capital a 2.00 USD risk requires 200 USD of notional at a 1 percent stop, which
+is the entire account in a single position, and 400 USD at a 0.5 percent stop,
+which is unreachable. That is not a worse option, it is an unworkable one at
+this capital.
+
+**BTC/USDT perpetual is excluded from trading.** Not from recording. The
+grounds are quantisation, and the numbers are from Bybit's own metadata on
+2026-08-16 with BTC at 63,035 and ETH at 1,880 USDT:
+
+| Instrument | Quantity step | Notional per step | Risk per step at a 1 percent stop | Distinct sizes within a 2.00 USD budget | Widest stop affordable at minimum size |
+|---|---|---|---|---|---|
+| ETH/USDT perpetual | 0.01 ETH | 18.80 USDT | 0.188 USDT | 10 | 10.6 percent |
+| BTC/USDT perpetual | 0.001 BTC | 63.03 USDT | 0.630 USDT | 3 | 3.17 percent |
+
+With three usable sizes, the realised risk on a BTC trade can sit up to 31
+percent away from the 1 percent the risk engine claims to be enforcing. A limit
+that is approximated to within a third is not being enforced, and `SPEC.md`
+section 6 already says the answer is to exclude the instrument rather than to
+accept the approximation. The exclusion is therefore consistent with the
+existing rule rather than a new one.
+
+**The exclusion is a configuration threshold, not a constant.** Expressed as
+the maximum acceptable deviation from intended risk and evaluated against live
+venue metadata and price, so it re-evaluates on its own as capital grows and
+BTC stops binding. Revisit at phase 5. Hardcoding today's answer would leave
+the system excluding an instrument for a reason that stopped being true.
+
+**Recording covers both BTC and ETH perpetuals.** Two subscriptions on the
+linear stream. Recording is the part that cannot be recovered later, because
+Bybit publishes no historical quote data at all: the public archives carry
+trades only, so crypto spread history begins when we start recording. BTC is
+also the reference asset for the regime and correlation work in phase 4. A
+trading exclusion is not a reason to lose the data.
+
+### Open items carried into the rest of phase 2
+
+| Item | Why it matters |
+|---|---|
+| Funding drag on a 200 USD account, as a percentage of expected per-trade profit | Requested by the director on 2026-08-16, to be delivered with the sizing report. If funding is a material fraction of edge at this size, that belongs on the record now rather than in phase 7 |
+| Dukascopy volume units | The feed does not document them. To be confirmed against a published definition, or cross checked against Pepperstone over an overlapping window with the ratio reported |
+| Weekday crypto tick rate | Storage sizing for crypto was deferred to a weekday measurement. A sampling scheme, if one turns out to be warranted, comes with its statistical justification rather than just a rate |
+
+---
+
+## Phases 3 through 9
 
 Not started. See `SPEC.md` section 8 for scope and exit criteria. Do not begin
 a phase before the previous phase's exit criteria are all met.
