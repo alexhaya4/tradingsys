@@ -219,10 +219,15 @@ Decided during phase 1.
 **Instrument universe.** EUR/USD, GBP/USD, USD/JPY, and AUD/USD on forex;
 BTC/USDT and ETH/USDT on crypto. Base accounting currency is USD.
 
-**Capital: 200 USD.** The demo account is funded to match the intended live
-capital deliberately, so that paper results at the phase 8 gate are comparable
-to what live trading would have produced rather than flattering it. Risk limits
-stay percentage-based, never absolute.
+**Capital: 200 USD, as configuration rather than as an assumption.** The demo
+account is funded to match the intended live capital deliberately, so that paper
+results at the phase 8 gate are comparable to what live trading would have
+produced rather than flattering it. Risk limits stay percentage-based, never
+absolute.
+
+The figure above is the current intent, not a constant the system is built
+around. See section 6.1: the system accepts any account size, and 200 USD is
+what this deployment happens to be funded with.
 
 Small capital interacts with venue minimums, and the interaction is a
 correctness problem rather than an inconvenience. Before an instrument is
@@ -386,6 +391,43 @@ Mandatory, not advisory:
 Every constraint below is configured, enforced by the risk engine process, and
 tested.
 
+### 6.1 Capital independence
+
+**The system accepts any account size.** There is no threshold below which it
+stops working, no assumed floor, and no capital figure written into code. Capital
+is configuration, and every quantity that depends on it is derived at runtime.
+
+This is a correctness requirement, not an aspiration, and it decomposes into four
+rules that are individually testable:
+
+**Balance comes from the venue, not from configuration.** Eligibility is evaluated
+against the account balance the venue reports, not against a configured constant.
+A configured figure is a statement of intent; the venue's figure is the fact, and
+where they disagree the venue wins, as everywhere else in section 3.2.
+
+**The tradeable instrument set is dynamic.** Because eligibility is arithmetic
+against live balance, live price, and live venue metadata, instruments enter and
+leave the tradeable set as any of those change. An instrument excluded at one
+balance and eligible at another must be handled without a code change and without
+a restart. Entry and exit are logged and audited, because a silently changing
+instrument universe is indistinguishable from a bug.
+
+**Every risk limit stays percentage-based.** No absolute currency amount appears
+as a constant anywhere in the risk engine. A limit expressed in currency is a
+limit that is wrong at every account size except the one it was written for, and
+it fails silently rather than loudly when the account changes.
+
+**The strategy implication is reported, not just the verdict.** An exclusion list
+says which instruments cannot be traded. It does not say what the account can
+still do, and that is the question an operator actually has. For a given balance
+the system reports the widest affordable stop per instrument, which is the real
+constraint: a stop ceiling below what a macro event routinely moves rules out an
+entire strategy class, and that has to be stated rather than inferred from an
+absence.
+
+Correctness evidence transfers across account sizes. Performance evidence does
+not. See the phase 8 gate.
+
 **Per-trade risk.** A fixed fraction of account equity at risk per position,
 determined by stop distance, not by a fixed lot size. Default ceiling: 1.0
 percent. Hard cap: 2.0 percent. Where 1 percent does not reach an instrument's
@@ -534,7 +576,18 @@ The decision to deploy capital is made here, on evidence, by the director. The
 criteria are set before the paper trading period begins, not after, so that
 they cannot be adjusted to fit the result.
 
+**Paper capital must match intended live capital at the time of the gate.**
+Correctness evidence transfers across account sizes and performance evidence does
+not: the same code sizing the same signal on a different balance produces a
+different instrument universe, different quantisation, and a different cost
+ratio, so a paper result at one capital says nothing reliable about live results
+at another. Current intent is 200 USD and the demo is funded to match. If that
+intent changes before phase 7, the demo is refunded to match **before** the paper
+period begins, not after, because a period that begins at the wrong capital
+cannot be repaired retrospectively and has to be rerun.
+
 Deployment requires all of the following:
+- Paper capital equal to intended live capital for the whole paper period.
 - Net-of-cost profitability over the paper period.
 - Maximum drawdown within the configured tolerance.
 - Live paper results consistent with backtested expectations for the same

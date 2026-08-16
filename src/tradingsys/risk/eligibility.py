@@ -70,6 +70,8 @@ class Eligibility:
 
     Attributes:
         instrument: What was evaluated.
+        price: The price the verdict was reached at, kept because every figure below
+            depends on it and a verdict without its price cannot be checked later.
         risk_budget: Account currency the trade is allowed to lose.
         intended_quantity: Exact size the budget implies, before the venue's step.
         tradeable_quantity: That size rounded down to the step. Zero when the budget
@@ -78,15 +80,22 @@ class Eligibility:
         worst_case_deviation: One step as a fraction of the intended size. The bound on
             how far realised risk can sit from intended for this instrument at this
             account size, whichever way the rounding happens to fall.
+        widest_affordable_stop: The largest stop distance, as a fraction of price, at
+            which the venue's minimum position still fits inside the risk budget. This
+            is the strategy constraint rather than the eligibility verdict: a stop
+            wider than this needs a position smaller than the venue accepts, so it
+            rules out every strategy whose stops are wider, at this balance.
         reason: Why it was excluded, or ``None`` when it was not.
     """
 
     instrument: Instrument
+    price: Decimal
     risk_budget: Decimal
     intended_quantity: Decimal
     tradeable_quantity: Decimal
     realised_risk: Decimal
     worst_case_deviation: Decimal
+    widest_affordable_stop: Decimal
     reason: ExclusionReason | None
 
     @property
@@ -168,6 +177,13 @@ def evaluate_eligibility(
         # can be at this account size. Reported for eligible instruments too: it is the
         # precision the risk limit is actually being held to.
         worst_case = instrument.quantity_increment / intended
+        # The stop ceiling this balance imposes. Derived from the same budget, so it
+        # moves with the account rather than being a figure written down once: at twice
+        # the equity the ceiling is twice as wide, which is the whole of what capital
+        # independence means in practice.
+        widest_stop = budget / (
+            instrument.min_quantity * price_value * instrument.contract_size * rate
+        )
 
     reason = _reason(
         instrument,
@@ -178,11 +194,13 @@ def evaluate_eligibility(
     )
     return Eligibility(
         instrument=instrument,
+        price=price_value,
         risk_budget=budget,
         intended_quantity=intended,
         tradeable_quantity=tradeable,
         realised_risk=realised,
         worst_case_deviation=worst_case,
+        widest_affordable_stop=widest_stop,
         reason=reason,
     )
 

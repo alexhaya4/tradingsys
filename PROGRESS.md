@@ -370,6 +370,8 @@ to be brought with evidence rather than resolved quietly.
 | cTrader adapter: transport | Complete | TLS, framing, handshake, live flag assertion, heartbeat. Verified against the real demo venue |
 | cTrader adapter: symbol metadata | Complete | Digits, pip position, volumes, swap rates and charging convention, trading mode, schedule. Verified against the live catalogue |
 | Sizing deliverable, forex half | Complete | Reported below. All four pairs excluded at a 1 percent stop |
+| Capital independence, SPEC 6.1 | Complete | Dynamic screen, property tests over eight orders of magnitude, structural guard against absolute amounts |
+| Resumable Dukascopy backfill | In progress | Reader and gap detector done; the runner over `backfill_hours` is next |
 | Instrument registry from venue metadata | Not started | Blocked on the cTrader adapter for the forex half |
 | Resumable Dukascopy backfill | Not started | Reader and gap detector are done; the runner over `backfill_hours` is not |
 | 72 hour continuous ingestion run | Not started | Begins once the adapters and the registry are working, and is reported before it starts |
@@ -555,6 +557,56 @@ the risk limit to fit is forbidden by SPEC 6 and is not on the list.
 
 The exclusion re-evaluates on its own: it is arithmetic against live metadata and
 live price, so it changes when the account grows or the broker changes a minimum.
+
+### Capital independence, and the strategy class it rules out
+
+**Status as of 2026-08-16T21:30Z: complete.** `SPEC.md` gained section 6.1 and the
+phase 8 gate gained the paper capital rule, both by the director's direction. The
+rulings are in `docs/DECISIONS.md`; the finding is here.
+
+**The system now has no capital figure in it.** `InstrumentScreen` holds only
+fractions and is handed a balance each call, so the tradeable set is recomputed
+rather than cached, instruments enter and leave as the balance moves without a
+restart, and the transitions are reported rather than inferred. Property tests
+generate balances across eight orders of magnitude and assert the identities that
+define the arithmetic rather than a table of expected numbers. A structural test
+parses the risk package and rejects any constant that could be an amount of money.
+
+**The finding the director asked for, and it is not comfortable.** The stop ceiling
+at 200 USD, reported per instrument, against reference stop distances that are
+**declared assumptions pending the phase 4a measurement**:
+
+| Instrument | Stop ceiling | Viable | Blocked |
+|---|---|---|---|
+| EUR/USD | 20.0 pips | scalping, intraday trend | swing, macro event |
+| GBP/USD | 20.0 pips | scalping, intraday trend | swing, macro event |
+| AUD/USD | 20.0 pips | scalping, intraday trend | swing, macro event |
+| USD/JPY | 31.9 pips | scalping, intraday trend | swing, macro event |
+
+**Macro event trading is blocked on every forex pair at this capital.** That is
+worth stating plainly because `SPEC.md` section 5.1 makes scheduled macro events
+the first signal layer to be built, ahead of trend and news, on the grounds that
+they give a testable signal. Section 5.2 is phase 4a. So the capital and the
+strategy plan are in tension, and the tension is arithmetic rather than a matter of
+opinion: a 2.00 USD budget over a 1000 unit venue minimum is 20 pips, whatever the
+strategy wants.
+
+The reference distances are assumptions and are labelled as such on every run of
+the check. Phase 4a measures what releases actually move, and at that point this
+becomes evidence rather than an estimate. It is raised now rather than then because
+the ordering of phase 4a is a decision the director may want to revisit before the
+work is done, not after.
+
+The options, none of which are taken here: accept a tighter stop than the event
+warrants and expect to be stopped out by noise, trade macro events on the crypto
+leg where the ETH ceiling is 10.6 percent rather than 0.17 percent, raise capital,
+find a venue with a smaller minimum lot, or reorder the phases so trend precedes
+macro. The last is the only one that costs nothing, and it is still the director's
+call.
+
+**The broker minimum lot investigation is unaffected and still stands.** A smaller
+venue minimum widens the viable strategy set at any capital, which is exactly what
+this table shows the binding constraint to be.
 
 ### Not a decision yet: unchanged snapshot repeats become tick rows
 

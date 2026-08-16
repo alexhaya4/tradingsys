@@ -78,6 +78,21 @@ two halves of the instrument universe are comparable. The widest affordable stop
 reported beside it, because that is the number that actually binds: a stop wider than
 it needs a position smaller than the venue will accept."""
 
+REFERENCE_STOPS_IN_PIPS: Final = (
+    ("scalping, 5 pips", 5),
+    ("intraday trend, 20 pips", 20),
+    ("swing, 50 pips", 50),
+    ("macro event, 80 pips", 80),
+)
+"""Stop distances typical of each strategy class, as **declared assumptions**.
+
+These are not measurements and must not be read as any. Phase 4a ingests the economic
+calendar and measures what high importance releases actually move, at which point this
+comparison becomes evidence and these figures are replaced. They are here now because a
+stop ceiling reported without anything to compare it against leaves the operator to
+infer the consequence, which is the thing SPEC 6.1 says must be stated.
+"""
+
 HEARTBEAT_SAMPLE_SECONDS: Final = 70
 """Long enough to observe at least two venue heartbeats at the expected 30s cadence."""
 
@@ -302,9 +317,47 @@ def print_sizing(instruments: dict[str, Instrument], prices: dict[str, Decimal])
         print(
             f"  intended size at {REFERENCE_STOP:.0%} stop  {verdict.intended_quantity:.2f} units"
         )
-        print(f"  widest affordable stop   {widest_stop:.4%} of price")
+        pips = (widest_stop * price) / (instrument.pip_size or Decimal(1))
+        print(f"  widest affordable stop   {widest_stop:.4%} of price, {pips:.1f} pips")
         print(f"  verdict                  {verdict.explain()}")
         print()
+
+    print_strategy_implication(instruments, prices)
+
+
+def print_strategy_implication(
+    instruments: dict[str, Instrument], prices: dict[str, Decimal]
+) -> None:
+    """What the stop ceiling rules in and out, which is the question behind the verdict.
+
+    `SPEC.md` section 6.1 requires the strategy implication rather than only the
+    eligibility verdict. An exclusion list says what cannot be traded; this says what
+    the account can still do, which is what an operator actually needs.
+
+    The reference distances are declared assumptions, not measurements, and are labelled
+    as such in the output. Phase 4a ingests the economic calendar and measures what
+    releases actually move, at which point this becomes evidence and these figures are
+    replaced.
+    """
+    print("=== strategy implication ===")
+    print("Reference stop distances below are ASSUMED, pending the phase 4a measurement.")
+    print()
+    for name, instrument in sorted(instruments.items()):
+        price = prices.get(name)
+        if price is None or instrument.pip_size is None:
+            continue
+        quote = instrument.quote_currency.code
+        conversion = Decimal(1) if quote == "USD" else Decimal(1) / price
+        with exact_context():
+            budget = ACCOUNT_EQUITY * RISK_FRACTION
+            ceiling_pips = budget / (instrument.min_quantity * conversion * instrument.pip_size)
+
+        viable = [label for label, need in REFERENCE_STOPS_IN_PIPS if Decimal(need) <= ceiling_pips]
+        blocked = [label for label, need in REFERENCE_STOPS_IN_PIPS if Decimal(need) > ceiling_pips]
+        print(f"{name}: stop ceiling {ceiling_pips:.1f} pips")
+        print(f"  viable:  {', '.join(viable) if viable else 'none'}")
+        print(f"  blocked: {', '.join(blocked) if blocked else 'none'}")
+    print()
 
 
 def main() -> int:

@@ -424,6 +424,69 @@ the crypto half was measured with, rather than repeating the arithmetic. A repor
 that computes eligibility its own way can disagree with the code that enforces it,
 and then neither can be trusted.
 
+### Capital independence is a requirement, and is enforced structurally
+
+Directed by the director on 2026-08-16 and recorded in `SPEC.md` section 6.1, with
+the phase 8 gate amended to require that paper capital match intended live capital.
+
+Most of it was already true, so the work was making it explicit, tested, and hard
+to regress. Three things were added.
+
+`InstrumentScreen` in `src/tradingsys/risk/screen.py` holds risk policy as
+fractions only and is handed a balance each time it is called, so the tradeable
+set is recomputed rather than cached. Instruments enter and leave as the balance
+moves, with no restart and no code change, and the transitions between two
+evaluations are first class output so that a changing instrument universe is
+reported rather than inferred from orders drying up.
+
+The eligibility result now carries the widest affordable stop, which is the
+strategy constraint the verdict implies. It is computed in the same place as the
+verdict so a report cannot disagree with the enforcement.
+
+`tests/risk/test_no_absolute_amounts.py` parses the risk package and rejects any
+constant that could be an amount of money: a literal reaching a `Money`
+constructor, a module scope `Decimal` that is not dimensionless, and any numeric
+default argument. Structural rather than arithmetic, because a limit written in
+currency produces correct arithmetic over a wrong constant and no test of the
+arithmetic can see it.
+
+**The guard was verified by mutation and one mutation defeated it.** An earlier
+version inspected only the immediate arguments of a `Money` call, so
+`Money(Decimal("200"), currency)` passed, the literal being one call deep. The
+test now walks the argument expressions. Worth recording because the hole was
+invisible from reading the test and appeared immediately on writing the mutation.
+
+### Capital independence is tested by property, not by a table of sizes
+
+Balances are generated across eight orders of magnitude and the assertions are the
+identities that define the arithmetic: the budget is the stated fraction of equity,
+the intended size loses exactly the budget at the stop, the tradeable size sits on
+the venue grid and never above intended, the verdict follows from the numbers, and
+multiplying the balance multiplies the size by the same factor.
+
+A fixture of chosen values passes for exactly the sizes whoever wrote it thought
+of, which is the wrong shape of evidence for a claim that the system accepts *any*
+account size.
+
+Linearity is asserted to within a relative tolerance of 1e-30 rather than exactly.
+Decimal arithmetic carries 34 significant digits, so dividing then multiplying can
+differ from the direct computation in the last place. The tolerance is wide enough
+for that reassociation and far too narrow for a threshold, an offset, or a rounding
+to a venue step to hide inside.
+
+### Strategy classes are compared against declared assumptions, and labelled as such
+
+`scripts/check_venue_assumptions.py` reports which strategy classes the stop
+ceiling admits, because SPEC 6.1 requires the implication rather than only the
+verdict. The reference stop distances it compares against are **assumptions, not
+measurements**, and the output says so on every run.
+
+Phase 4a ingests the economic calendar and measures what high importance releases
+actually move. At that point the comparison becomes evidence and the assumed
+figures are replaced. Stating them as assumptions now is better than leaving the
+operator to infer the consequence from an exclusion list, and better than quietly
+presenting a guess as a finding.
+
 ---
 
 ## Decisions that live in `SPEC.md`
