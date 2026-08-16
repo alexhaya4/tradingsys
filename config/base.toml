@@ -84,5 +84,17 @@ token_refresh_margin_seconds = 259200.0
 enabled = false
 exchange_id = "bybit"
 sandbox = true
+mainnet_rest_url = "https://api.bybit.com"
+testnet_rest_url = "https://api-testnet.bybit.com"
+mainnet_ws_public_url = "wss://stream.bybit.com/v5/public"
+testnet_ws_public_url = "wss://stream-testnet.bybit.com/v5/public"
 request_timeout_seconds = 10.0
+# The venue permits 600 requests per five seconds per IP and answers a breach with a
+# ten minute block. Nothing here needs that rate, so the cap keeps a wide margin.
 max_requests_per_second = 10.0
+max_retries = 5
+retry_backoff_seconds = 0.5
+# Bybit's own documented figures: ping every 20 seconds, idle connections cut at ten
+# minutes. The receive timeout is ours, set between the two.
+ws_ping_interval_seconds = 20.0
+ws_receive_timeout_seconds = 30.0

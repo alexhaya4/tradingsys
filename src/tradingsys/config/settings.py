@@ -415,16 +415,96 @@ class ForexVenueSettings(_Section):
 
 @final
 class CryptoVenueSettings(_Section):
-    """Connection settings for one ccxt supported exchange."""
+    """Connection settings for one crypto exchange.
+
+    Endpoints are configuration for the same reason the forex venue's are: mainnet and
+    testnet differ only by hostname, and a constant in code makes that distinction
+    invisible in review. Both are held here and neither is selected here. Which one is
+    used is derived from :attr:`sandbox`, so no deployment can express the mismatch of
+    testnet credentials against the mainnet endpoint.
+    """
 
     enabled: bool
     exchange_id: NonEmptyStr
     sandbox: bool
+    mainnet_rest_url: NonEmptyStr
+    testnet_rest_url: NonEmptyStr
+    mainnet_ws_public_url: NonEmptyStr
+    testnet_ws_public_url: NonEmptyStr
+    """Root of the public stream, without the product category.
+
+    Bybit puts the category in the path, ``/v5/public/linear`` against
+    ``/v5/public/spot``, and the two carry different instruments. The adapter appends
+    it so that one configured root serves every category rather than needing a field
+    per product.
+    """
     api_key: SecretStr | None = None
     api_secret: SecretStr | None = None
     api_passphrase: SecretStr | None = None
     request_timeout_seconds: PositiveSeconds = 10.0
     max_requests_per_second: Annotated[float, Field(gt=0)] = 10.0
+    """Client side cap, deliberately far below the venue's published ceiling.
+
+    Bybit allows 600 requests per five seconds per IP, which is 120 per second, and
+    answers a breach with a ten minute block rather than a retryable error. Nothing
+    this system does needs that rate, so the margin is enormous on purpose: the cost of
+    being slow is a few seconds on a backfill, and the cost of being blocked is ten
+    minutes of no market data at all.
+    """
+    max_retries: Annotated[int, Field(ge=0)] = 5
+    retry_backoff_seconds: PositiveSeconds = 0.5
+    ws_ping_interval_seconds: PositiveSeconds = 20.0
+    """Bybit documents a 20 second application level ping and cuts an idle connection
+    after ten minutes. This is the venue's number, not a guess."""
+    ws_receive_timeout_seconds: PositiveSeconds = 30.0
+    """How long a silent socket is tolerated before it is treated as dead.
+
+    Longer than the ping interval so that one late pong is not a disconnect, and much
+    shorter than the venue's ten minute idle cut, because a stream that has stopped
+    delivering is indistinguishable from a stalled one and both need a reconnect.
+    """
+
+    @model_validator(mode="after")
+    def _check_endpoints(self) -> Self:
+        for name, value, scheme in (
+            ("mainnet_rest_url", self.mainnet_rest_url, "https://"),
+            ("testnet_rest_url", self.testnet_rest_url, "https://"),
+            ("mainnet_ws_public_url", self.mainnet_ws_public_url, "wss://"),
+            ("testnet_ws_public_url", self.testnet_ws_public_url, "wss://"),
+        ):
+            if not value.startswith(scheme):
+                raise ValueError(
+                    f"{name} must start with {scheme}; market data crossing the network "
+                    f"unencrypted can be read and altered in transit, got {value!r}"
+                )
+        if self.mainnet_rest_url == self.testnet_rest_url:
+            raise ValueError(
+                f"mainnet_rest_url and testnet_rest_url are both {self.mainnet_rest_url!r}. "
+                f"The two environments hold different accounts and different balances, so "
+                f"they cannot share a hostname."
+            )
+        if self.mainnet_ws_public_url == self.testnet_ws_public_url:
+            raise ValueError(
+                f"mainnet_ws_public_url and testnet_ws_public_url are both "
+                f"{self.mainnet_ws_public_url!r}. Recording testnet quotes as though they "
+                f"were the real market would poison the research data silently."
+            )
+        return self
+
+    @property
+    def rest_url(self) -> str:
+        """The REST root for the configured environment.
+
+        Derived, not configured, for the same reason as the forex venue's ``api_host``:
+        there must be no field in which a testnet deployment can name the mainnet
+        endpoint.
+        """
+        return self.testnet_rest_url if self.sandbox else self.mainnet_rest_url
+
+    @property
+    def ws_public_url(self) -> str:
+        """The public stream root for the configured environment."""
+        return self.testnet_ws_public_url if self.sandbox else self.mainnet_ws_public_url
 
     @property
     def has_credentials(self) -> bool:

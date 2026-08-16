@@ -111,6 +111,10 @@ class TestLayering:
 enabled = false
 exchange_id = "bybit"
 sandbox = true
+mainnet_rest_url = "https://api.bybit.com"
+testnet_rest_url = "https://api-testnet.bybit.com"
+mainnet_ws_public_url = "wss://stream.bybit.com/v5/public"
+testnet_ws_public_url = "wss://stream-testnet.bybit.com/v5/public"
 """
         )
         settings = load(config_dir, env(TRADINGSYS_VENUES__CRYPTO__BYBIT__API_KEY="key-from-env"))
@@ -420,6 +424,10 @@ class TestLiveTradingSafety:
 enabled = true
 exchange_id = "bybit"
 sandbox = false
+mainnet_rest_url = "https://api.bybit.com"
+testnet_rest_url = "https://api-testnet.bybit.com"
+mainnet_ws_public_url = "wss://stream.bybit.com/v5/public"
+testnet_ws_public_url = "wss://stream-testnet.bybit.com/v5/public"
 """
         )
         with pytest.raises(ConfigurationError, match=r"venues\.crypto\.bybit"):
