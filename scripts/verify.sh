@@ -39,6 +39,7 @@ REQUIRED_VARS=(POSTGRES_PASSWORD TRADINGSYS_DATABASE__PASSWORD GRAFANA_PASSWORD)
 DB_READY_TIMEOUT_SECONDS=60
 APP_READY_TIMEOUT_SECONDS=90
 PROMETHEUS_TIMEOUT_SECONDS=90
+HTTP_TIMEOUT_SECONDS=10
 
 usage() {
     # The header comment block is the help text, so the two cannot disagree. Printing
@@ -68,6 +69,36 @@ step() {
         return 0
     fi
     "$@"
+}
+
+HTTP_BODY=""
+
+http_get() {
+    # Fetch a URL into HTTP_BODY, aborting with curl's own exit status if the
+    # transport failed, so that a refused connection is never reported as missing
+    # content.
+    #
+    # Deliberately not `curl URL | grep -q PATTERN`. That pipeline has two defects and
+    # both cost real time.
+    #
+    # It destroys evidence. A refused connection, an HTTP error, a broken pipe, and a
+    # body that genuinely lacks the pattern all produce one identical message and no
+    # trace of what came back. CI run 31939779488 failed that way and had to be
+    # re-run to classify, because the log could not distinguish the four.
+    #
+    # And it can fail while the pattern is present. `grep -q` exits at its first
+    # match; if curl is still writing it takes EPIPE, exits 23, and under `pipefail`
+    # that fails the pipeline. The series this script looks for is the first one in
+    # the payload, which makes that window as wide as it can be.
+    #
+    # stderr is folded into the capture rather than sent to a temporary file: `curl
+    # -fsS` is silent on success, so on failure HTTP_BODY carries curl's own
+    # diagnosis and there is nothing to clean up.
+    local url="$1" status=0
+    HTTP_BODY=$(curl -fsS --max-time "$HTTP_TIMEOUT_SECONDS" "$url" 2>&1) || status=$?
+    if ((status != 0)); then
+        fail "could not fetch ${url}: curl exited ${status}: ${HTTP_BODY}"
+    fi
 }
 
 # ---------------------------------------------------------------------------------
@@ -235,12 +266,18 @@ run_integration_tests() {
 
 start_full_stack() {
     docker compose up -d --build
-    local waited=0
-    until curl -fsS http://localhost:8000/ready >/dev/null 2>&1; do
+    local waited=0 status=0 reason
+    until curl -fsS --max-time "$HTTP_TIMEOUT_SECONDS" \
+        http://localhost:8000/ready >/dev/null 2>&1; do
         waited=$((waited + 1))
         if ((waited > APP_READY_TIMEOUT_SECONDS)); then
             docker compose logs --tail 50 app >&2
-            fail "the app did not report ready within ${APP_READY_TIMEOUT_SECONDS}s"
+            # One further attempt with the error kept, so the failure says why the app
+            # never answered rather than only that it never did.
+            reason=$(curl -fsS --max-time "$HTTP_TIMEOUT_SECONDS" \
+                http://localhost:8000/ready 2>&1) || status=$?
+            fail "the app did not report ready within ${APP_READY_TIMEOUT_SECONDS}s; \
+last attempt, curl exit ${status}: ${reason}"
         fi
         sleep 1
     done
@@ -248,28 +285,57 @@ start_full_stack() {
 }
 
 probe_endpoints() {
-    local body
+    local path
     for path in /health /ready; do
-        body=$(curl -fsS "http://localhost:8000${path}")
-        printf '%s -> %s\n' "$path" "$body"
-        grep -q '"status":"pass"' <<<"$body" ||
-            fail "${path} did not report pass"
+        http_get "http://localhost:8000${path}"
+        printf '%s -> %s\n' "$path" "$HTTP_BODY"
+        grep -q '"status":"pass"' <<<"$HTTP_BODY" ||
+            fail "${path} answered but did not report pass: ${HTTP_BODY}"
     done
-    curl -fsS http://localhost:8000/metrics | grep -q '^tradingsys_build_info' ||
-        fail "/metrics did not expose tradingsys_build_info"
+
+    http_get http://localhost:8000/metrics
+    grep -q '^tradingsys_build_info' <<<"$HTTP_BODY" || fail "$(
+        cat <<MESSAGE
+/metrics answered ${#HTTP_BODY} bytes but exposed no tradingsys_build_info sample line.
+
+Retrying is not the answer and a more patient probe would be the wrong fix. Readiness
+passed immediately before this, and /ready and /metrics are two routes on one app
+closing over one metric registry that is built before the port is bound, so if the
+port answers at all the series is already registered and set. There is no window in
+which this can be absent for timing reasons, which means something else is wrong and
+a retry would only hide it.
+
+The first twenty lines of what came back:
+$(head -20 <<<"$HTTP_BODY")
+MESSAGE
+    )"
     log "/metrics exposes the expected series"
 }
 
 check_prometheus() {
-    local waited=0 targets
+    # This one polls rather than asserting, because prometheus is expected to be
+    # unreachable for the first few seconds, so http_get's abort-on-failure is wrong
+    # here and curl's status is kept instead.
+    local waited=0 targets status
     while true; do
-        targets=$(curl -fsS 'http://localhost:9090/api/v1/targets?state=active' 2>/dev/null || true)
-        if [[ -n "$targets" ]] && ! grep -q '"health":"down"' <<<"$targets"; then
-            grep -q '"health":"up"' <<<"$targets" && break
+        status=0
+        targets=$(curl -fsS --max-time "$HTTP_TIMEOUT_SECONDS" \
+            'http://localhost:9090/api/v1/targets?state=active' 2>&1) || status=$?
+
+        # Every condition sits inside the `if`, where a failing command is exempt from
+        # `set -e`, so a target that is reported neither up nor down means retry.
+        if ((status == 0)) &&
+            ! grep -q '"health":"down"' <<<"$targets" &&
+            grep -q '"health":"up"' <<<"$targets"; then
+            break
         fi
+
         waited=$((waited + 1))
         if ((waited > PROMETHEUS_TIMEOUT_SECONDS)); then
-            printf '%s\n' "$targets" >&2
+            # The previous version sent curl's error to /dev/null, so a prometheus
+            # that never answered at all timed out with an empty document and no
+            # stated reason.
+            printf 'last attempt, curl exit %s:\n%s\n' "$status" "$targets" >&2
             fail "prometheus targets did not all come up within ${PROMETHEUS_TIMEOUT_SECONDS}s"
         fi
         sleep 1

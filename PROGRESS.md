@@ -4,10 +4,21 @@ Companion to `SPEC.md`. This file is updated as work completes. `SPEC.md` is
 not modified except by explicit direction from the director.
 
 **Current phase:** 2, Market data
-**Status:** in progress, and CI is red on purpose. The failing run is diagnosed
-but not fixed, and is the first task of the next session: see "Start here" in
-the phase 2 section. Phase 1 is complete and accepted; its record is kept below
-unchanged.
+**Status as of 2026-08-16T17:45Z:** in progress. CI is green on HEAD. Phase 1 is
+complete and accepted; its record is kept below unchanged.
+
+**Decisions taken during implementation now live in `docs/DECISIONS.md`.** They
+were moved there on 2026-08-16 because `SPEC.md` section 13 already sent a
+recovering session to that path and the file did not exist. Rulings are permanent
+and this tracker is not, so keeping them here meant rewriting them every time the
+tracker was rewritten.
+
+**Every status claim in this file states the time it describes.** The previous
+capture did not, and it arrived stale: it was written while a pipeline was still
+running, recorded CI as red when the next run had already turned it green, and
+counted two CI runs when a third existed. Both claims were false by the time they
+were read. A tracker written mid-run either dates its claims or misleads the
+session it was written for.
 
 ---
 
@@ -85,36 +96,12 @@ with a message naming the field and the environment variable that would set it.
 
 ### Decisions taken during phase 1
 
-| Decision | Rationale |
-|---|---|
-| Package named `tradingsys` | Directory name is incidental; the package name appears in every import |
-| Interfaces shaped against real venue semantics, with no venue vocabulary in them | Proven when the forex venue changed from OANDA to cTrader mid-phase and no interface changed |
-| Forex venue is cTrader Open API via Pepperstone | OANDA does not accept registrations from Kenya. See SPEC 3.3 |
-| OAuth credentials modelled as four flat secret fields | A validation failure can then name each absent field, which a nested `credentials` section cannot |
-| Credential expiry and refresh live on `VenueConnection` | An expiring token is a property of some venues, not a cTrader implementation detail, and a supervisor has to see it |
-| `refresh_credentials` returns the new material instead of absorbing it | cTrader rotates the refresh token, and the replacement must be persisted before the next restart or the account locks out |
-| The audit digest is pinned to a golden value in a test | Every other hash test compares production output to production output, so a change to the canonical form would pass while invalidating every stored digest |
-| TOML for the file layers | Unambiguous typing, consistent with pyproject.toml |
-| `venue_symbol` stored beside the canonical symbol | SPEC 4 requires venue symbol mapping; the transformation is not derivable |
-| Audit appends serialised by a transaction level advisory lock | Two concurrent writers would otherwise fork the hash chain |
-| `previous_hash` is UNIQUE | Makes a chain fork impossible at the storage layer, not only by convention |
-| Live venues require `app.allow_live_trading` and production | Copying a production config to a developer machine cannot arm real orders |
-| Integration tests fail rather than skip | A suite that skips its only storage coverage reports green while testing nothing |
-| The application never reads `.env`, in any environment | See below |
-| `scripts/verify.sh` is the only verification path, invoked by both the README and CI | A transcribed command sequence drifts from the one that actually runs, which is how the 61 error run happened |
-
-### Why the application never reads .env
-
-`.env` is read by docker compose and by `scripts/verify.sh`. The application has no
-dotenv source at all, in development, test, staging, or production.
-
-The rule is that the application reads secrets only from the environment or the secrets
-directory, never from a file it parses, and the rule is valuable precisely because it
-has no exceptions. The tempting alternative, permitting `.env` in development and test
-and refusing it in staging and production, makes the guarantee conditional on the
-environment selector itself being correct, which adds a failure mode on the day it
-matters most. The invariant stays absolute and the cost is paid in documentation: one
-`set -a` line, which `scripts/verify.sh` runs for you.
+Moved to `docs/DECISIONS.md` on 2026-08-16, with their reasoning intact. That file
+is the decision log `SPEC.md` section 13 step 3 directs a recovering session to.
+Fifteen decisions were recorded for this phase, including why the application
+never reads `.env` in any environment, why `refresh_credentials` returns the new
+material instead of absorbing it, and why `scripts/verify.sh` is the only
+verification path.
 
 ### Follow-up round: the 61 error integration run
 
@@ -287,62 +274,87 @@ Two items remain open for phase 2:
 **Status:** in progress. Written to be read cold. Everything a session needs to
 resume is in this section; nothing depends on remembering a conversation.
 
-### Start here: the next session's first task
+### The CI failure of 2026-08-16T09:44Z, diagnosed and recorded as unexplained
 
-**CI is failing, and it must be diagnosed before it is fixed.**
+**Status as of 2026-08-16T17:45Z: closed as unexplained, not as fixed.** The
+probe that reported it has been repaired, and the underlying event has no
+established mechanism. Recorded that way deliberately: a tracker that says
+"fixed" when nobody found the cause is how the same failure gets misdiagnosed
+the next time it appears.
+
+The failure was run 31939779488, commit `aa3e501`:
 
 ```
 verify: /metrics did not expose tradingsys_build_info
 Error: Process completed with exit code 1
 ```
 
-Run 31939779488, commit `aa3e501`, 2026-08-16T09:44Z. Everything before that
-step passed: the fresh provision from empty volumes, both migrations base to
-head, 1081 unit and 70 integration tests, and a full stack reporting healthy.
-The failing step is the endpoint probe at the end of `scripts/verify.sh`,
-around line 258, which greps `/metrics` for `^tradingsys_build_info`. The
-series is registered in `src/tradingsys/observability/metrics.py` line 114.
+**Classification: a race, not a regression. Proven, not inferred.**
 
-Two things make this non-trivial, and both must be settled before any code
-changes.
+| Run | Commit | Result |
+|---|---|---|
+| 31939273660 | `e01e36d` | success, 2m19s |
+| 31939779488 | `aa3e501` | **failure**, 1m50s |
+| 31941861860 | `7a3617a` | success, 2m24s |
+| 31939779488, re-run 2026-08-16T10:44Z | `aa3e501`, unchanged | **success** |
 
-**1. Establish whether this is a regression or a race, first.** The same script
-passed in 2 minutes 19 seconds on the previous commit, `e01e36d`. One piece of
-evidence is already in hand and points hard at a race: `aa3e501` changed
-`PROGRESS.md` and nothing else, 83 insertions in one markdown file, no
-application code, no configuration, no Dockerfile. A code regression is
-therefore close to impossible, and the timing in the log is suggestive: the app
-container started at 09:44:49.49, the script reported ready after 2 seconds,
-and the metrics probe ran at 09:44:51.94, roughly 2.4 seconds after start.
+The same commit passes on re-run. The commits either side changed markdown only.
 
-That is a pointer, not a conclusion. It has not been proven, and the run has
-not been repeated. Do that first.
+**The original hypothesis was wrong, and this is the part worth carrying.** The
+previous capture proposed that readiness was lying: that the app reported ready
+before the metric was registered. That cannot happen. `/ready` and `/metrics` are
+two routes on one Starlette app built by `build_operational_app`, both closing
+over a single `Metrics` object created in `Application.build`
+(`src/tradingsys/app/runtime.py:94`), and `build_info.labels(...).set(1)` runs
+synchronously inside `Metrics.create` (`metrics.py:120`), before `start()`
+connects anything and long before `serve()` binds the port. One call site, one
+registry. If the port answers at all, the series is already registered and set.
 
-**If it is a race, making the probe more patient is the wrong fix.** A metric
-that is sometimes absent after the application has reported ready means
-readiness is lying, and that is the defect. Readiness exists to answer one
-question, whether this process is prepared to be used, and a process whose
-metrics are not yet exposed is not prepared to be scraped. Adding a retry loop
-to the probe would silence the symptom, keep the false readiness signal, and
-leave Prometheus free to scrape a target that has just declared itself ready
-and get nothing back.
+Tested rather than only read:
 
-**2. `/health` returned `"checks":[]` on the same run, while `/ready` reported
-database and redis both passing.** The empty list is intended: see
-`src/tradingsys/observability/server.py` line 89, where liveness returns an
-empty report when no liveness checks are registered, and the docstring at line
+| Test | Result |
+|---|---|
+| 40 app restarts, readiness polled exactly as `verify.sh` does, then the probe | 40/40 exposed the series; ready in 1 to 2s; body 5825 to 5828 bytes |
+| 4000 requests at concurrency 60, interleaved with `/ready` evaluations mutating the same registry | 4000 x HTTP 200, zero responses missing the sample line |
+| The exact probe pipeline, 300 runs, GNU grep | zero failures |
+
+**What the evidence still does not explain.** curl completed a round trip in
+13.4ms, the same as the successful runs, exited zero, printed nothing, and the
+match failed. The container logs show one process, one startup, no restart, no
+exception. The `pipefail` broken-pipe mechanism described below is real and was
+reproduced, but it announces itself with `curl: (23) Failure writing output to
+destination`, and that string appears nowhere in the run log, which does capture
+stderr. No mechanism in this codebase produces that body, and it did not
+reproduce locally in roughly 4400 requests and 40 fresh starts.
+
+**What was actually defective, and is now fixed.** The probe itself, at
+`scripts/verify.sh`. It piped curl into `grep -q`, which had two defects: it
+reported a refused connection, an HTTP error, a broken pipe, and a genuinely
+missing series with one identical message and no trace of what came back, and
+under `pipefail` it could fail while the series was present. See
+`docs/DECISIONS.md` for the ruling and `TestChecksDoNotDiscardTheirEvidence` in
+`tests/test_verification_path.py` for the guard.
+
+The practical consequence: if this recurs, the log will carry the byte count, the
+HTTP status or curl's exit code, and the first twenty lines of the body. It will
+be diagnosable from the log rather than by re-running the pipeline.
+
+### Still open for the director: what `/health` asserts
+
+Unchanged and not answered by the above. `/health` returned `"checks":[]` on the
+failing run while `/ready` reported database and redis passing. The empty list is
+intended: see `src/tradingsys/observability/server.py:89`, where liveness returns
+an empty report when no liveness checks are registered, and the docstring at line
 84 explains why. Liveness must not depend on anything external, or a database
-blip restarts a perfectly healthy process. That is the standard split and it is
-deliberate.
+blip restarts a perfectly healthy process. That is the standard split.
 
-The director's concern is still live and is not answered by the above: an
-endpoint that asserts nothing reports healthy through an outage, and gets
-trusted for more than it checks. What `/health` currently asserts is real but
-narrow: the process is running, the event loop is turning, and the server can
-accept a connection and serve a response. What it does not assert is any
-internal invariant, and the docstring already anticipates registering one, such
-as a stalled event loop detector. Whether that is worth adding is a decision
-for the director, not a defect to fix silently.
+The director's concern is not addressed by that: an endpoint that asserts nothing
+reports healthy through an outage and gets trusted for more than it checks. What
+`/health` currently asserts is real but narrow, namely that the process is
+running, the event loop is turning, and the server can accept a connection and
+serve a response. What it does not assert is any internal invariant. Whether to
+register one, such as a stalled loop detector, is the director's decision and is
+to be brought with evidence rather than resolved quietly.
 
 | Task | Status | Notes |
 |---|---|---|
@@ -354,15 +366,16 @@ for the director, not a defect to fix silently.
 | Quote recorder into the tick table | Complete | Batched, retried, flushed on shutdown, tagged with its source |
 | Instrument eligibility screen | Complete | Configurable maximum deviation from intended risk, evaluated against live metadata |
 | Funding drag measurement | Complete | Reported below |
-| cTrader adapter | Not started | Next build after the CI diagnosis |
+| CI probe diagnosis and repair | Complete | Race, not regression, proven by re-run. Cause unexplained; probe repaired so a recurrence is diagnosable from the log |
+| cTrader adapter | In progress | Started 2026-08-16 after the CI diagnosis |
 | Instrument registry from venue metadata | Not started | Blocked on the cTrader adapter for the forex half |
 | Resumable Dukascopy backfill | Not started | Reader and gap detector are done; the runner over `backfill_hours` is not |
 | 72 hour continuous ingestion run | Not started | Begins once the adapters and the registry are working, and is reported before it starts |
 
 ### Outstanding work, in the order it should be done
 
-1. **Diagnose the CI failure.** See the section above. Nothing else should be
-   built on top of a pipeline whose result is not trusted.
+1. ~~**Diagnose the CI failure.**~~ Done 2026-08-16. Race not regression, cause
+   unexplained, probe repaired. See the section above.
 2. **cTrader adapter.** Protobuf over TLS to port 5035, application auth, then
    account auth, then heartbeat. Rotating refresh tokens. Symbol metadata: pip
    position, digits, minimum volume, volume step, swap rates and the charging
@@ -400,16 +413,16 @@ for the director, not a defect to fix silently.
 
 ### Decisions taken during phase 2
 
-**Crypto product: linear perpetuals, not spot.** Decided by the director on
-2026-08-16 after the measurement below. Spot is unleveraged, so at 200 USD of
-capital a 2.00 USD risk requires 200 USD of notional at a 1 percent stop, which
-is the entire account in a single position, and 400 USD at a 0.5 percent stop,
-which is unreachable. That is not a worse option, it is an unworkable one at
-this capital.
+Moved to `docs/DECISIONS.md` on 2026-08-16, with their reasoning intact: linear
+perpetuals rather than spot, the BTC/USDT trading exclusion, the exclusion being
+a configuration threshold rather than a constant, recording both instruments
+regardless of the exclusion, USDT not being treated as USD, the `bybit`
+configuration key, unsigned commits, the CI trigger, and the verification probe
+ruling taken today.
 
-**BTC/USDT perpetual is excluded from trading.** Not from recording. The
-grounds are quantisation, and the numbers are from Bybit's own metadata on
-2026-08-16 with BTC at 63,035 and ETH at 1,880 USDT:
+The measurement that produced the BTC exclusion stays here, because it is
+evidence rather than a ruling. From Bybit's own metadata on 2026-08-16, with BTC
+at 63,035 and ETH at 1,880 USDT:
 
 | Instrument | Quantity step | Notional per step | Risk per step at a 1 percent stop | Distinct sizes within a 2.00 USD budget | Widest stop affordable at minimum size |
 |---|---|---|---|---|---|
@@ -417,61 +430,28 @@ grounds are quantisation, and the numbers are from Bybit's own metadata on
 | BTC/USDT perpetual | 0.001 BTC | 63.03 USDT | 0.630 USDT | 3 | 3.17 percent |
 
 With three usable sizes, the realised risk on a BTC trade can sit up to 31
-percent away from the 1 percent the risk engine claims to be enforcing. A limit
-that is approximated to within a third is not being enforced, and `SPEC.md`
-section 6 already says the answer is to exclude the instrument rather than to
-accept the approximation. The exclusion is therefore consistent with the
-existing rule rather than a new one.
+percent away from the 1 percent the risk engine claims to be enforcing.
 
-**The exclusion is a configuration threshold, not a constant.** Expressed as
-the maximum acceptable deviation from intended risk and evaluated against live
-venue metadata and price, so it re-evaluates on its own as capital grows and
-BTC stops binding. Revisit at phase 5. Hardcoding today's answer would leave
-the system excluding an instrument for a reason that stopped being true.
+### Not a decision yet: unchanged snapshot repeats become tick rows
 
-**Recording covers both BTC and ETH perpetuals.** Two subscriptions on the
-linear stream. Recording is the part that cannot be recovered later, because
-Bybit publishes no historical quote data at all: the public archives carry
-trades only, so crypto spread history begins when we start recording. BTC is
-also the reference asset for the regime and correlation work in phase 4. A
-trading exclusion is not a reason to lose the data.
+**Open. Waiting on the measured row counts, and then on the director.**
 
-**`SPEC.md` gained section 5.5, a holding period constraint on the crypto leg.**
-Directed on 2026-08-16 after the funding measurement below. This is the only
-structural change to the specification made this session, and it is a
-constraint rather than a note: every crypto strategy declares a maximum holding
-period whose implied funding drag is a stated, bounded fraction of its expected
-edge, tight stops paired with multi-day holds are rejected at design time
-because halving the stop doubles the notional carried per unit of risk, and
-phase 3 reports funding as its own result line for every crypto backtest,
-gross and net. A crypto strategy profitable only when funding is ignored is not
-profitable. The phase 3 exit criteria in section 8 were updated to match.
-
-**USDT is not treated as USD.** The eligibility screen refuses to convert
-between an instrument's quote currency and the account currency without an
-explicit rate, so every Bybit calculation states the rate it used. The peg
-holding is a market observation, not an identity, and the same assumption on a
-JPY quoted forex pair would be wrong by a factor of about 150. This surfaced
-while writing the eligibility tests, which is why it is recorded as a decision
-rather than left as an implementation detail.
-
-**Every venue message currently becomes a tick row, including unchanged
-repeats.** This is the present behaviour rather than a decision, and it needs
-one. Bybit documents that a level 1 topic repeats its snapshot with the *same*
-`u` when nothing has changed for three seconds, and `BookState.apply` emits a
-quote for each such message. Storage deduplicates on instrument, source, and
-timestamp, and a repeat carries a new timestamp, so it lands as a new row: up
-to 28,800 rows per instrument per day carrying no information during a quiet
-market.
+Every venue message currently becomes a tick row, including unchanged repeats.
+This is the present behaviour rather than a decision, and it needs one. Bybit
+documents that a level 1 topic repeats its snapshot with the *same* `u` when
+nothing has changed for three seconds, and `BookState.apply` emits a quote for
+each such message. Storage deduplicates on instrument, source, and timestamp, and
+a repeat carries a new timestamp, so it lands as a new row: up to 28,800 rows per
+instrument per day carrying no information during a quiet market.
 
 The detection rule is exact and needs no heuristic, since an unchanged repeat
-reuses the update id. Suppressing them is not done yet because it interacts
-with the retention question that the weekday capture is meant to settle, and
-because the argument for keeping them is not empty: a row per three seconds is
-also evidence the feed was alive. That evidence already exists in the ping, the
-receive deadline, and the recorder counters, so the likely answer is to
-suppress and rely on those, but it is the director's call and it should be
-taken with the measured row counts in hand rather than before them.
+reuses the update id. Suppressing them is not done yet because it interacts with
+the retention question that the weekday capture is meant to settle, and because
+the argument for keeping them is not empty: a row per three seconds is also
+evidence the feed was alive. That evidence already exists in the ping, the receive
+deadline, and the recorder counters, so the likely answer is to suppress and rely
+on those, but it is the director's call and it should be taken with the measured
+row counts in hand rather than before them.
 
 ### Defects found this session, with their diagnoses
 
@@ -612,40 +592,28 @@ account is a demo. The push went ahead on that basis. The historical commits
 still contain it in the test files, which is only worth rewriting if this
 repository ever stops being private.
 
-### CI now runs, and is currently red
+### CI now runs, and is green
 
-The workflow had never executed once before this session. That is recorded as
-defect 4 above, with its diagnosis, because a check that is counted as coverage
-and has never run is worse than no check.
+**As of 2026-08-16T17:45Z.** The workflow had never executed once before the
+previous session. That is recorded as defect 4 above, with its diagnosis, because
+a check counted as coverage that has never run is worse than no check.
 
-It runs on every branch now, and two runs exist. `e01e36d` passed in 2 minutes
-19 seconds. `aa3e501` failed on the metrics probe, and that failure is the
-first task of the next session, described at the top of this section. **CI is
-red as of the end of this session, deliberately left that way**: the director
-asked for the failure to be captured rather than fixed, so that whether it is a
-regression or a race is established before anything is changed.
+It runs on every branch now. Three runs existed at the previous capture, not two,
+and the third had already turned CI green before that capture was read:
 
-**The phase branch is not merged into `main`, and merging it is not a way to
-make CI fire.** Phase branches merge when the phase completes and its exit
-criteria are met, not to satisfy tooling. `main` therefore stays at the phase 1
-commit until phase 2 is done and accepted.
+| Run | Commit | Result |
+|---|---|---|
+| 31939273660 | `e01e36d` | success |
+| 31939779488 | `aa3e501` | failure on the metrics probe, since diagnosed |
+| 31941861860 | `7a3617a` | success |
 
-### Commits are not GPG signed, deliberately
+The failure was classified as a race and its probe repaired. See the diagnosis
+section at the top of this phase.
 
-Decided by the director on 2026-08-16, recorded here so it is not reopened
-every session.
-
-GPG cannot reach a TTY in this environment, so signing would need an agent
-with a cached passphrase or a passphraseless key kept on disk. On a private
-single-author repository that buys no security: a signature proves the commit
-came from the key holder, and there is one author, one machine, and no second
-party to whom that proof is addressed. The workaround would be a moving part
-that fails at inconvenient times and protects against nothing that is actually
-in the threat model.
-
-If the repository ever gains a second author or becomes public, this decision
-is worth revisiting, because at that point signatures start proving something
-to someone.
+**The phase branch is not merged into `main`, and merging it is not a way to make
+CI fire.** Phase branches merge when the phase completes and its exit criteria are
+met, not to satisfy tooling. `main` therefore stays at the phase 1 commit until
+phase 2 is done and accepted.
 
 ### Open items carried into the rest of phase 2
 
@@ -653,29 +621,54 @@ to someone.
 |---|---|
 | Dukascopy volume units | The feed does not document them. To be confirmed against a published definition, or cross checked against Pepperstone over an overlapping window with the ratio reported |
 | Weekday crypto tick rate | Capture scheduled, see below. Crypto retention is not set until it lands. A sampling scheme, if one turns out to be warranted, comes with its statistical justification rather than just a rate |
-| Unchanged snapshot repeats stored as rows | Described under the phase 2 decisions. Decide with the measured row counts in hand, not before |
-| `/health` asserts no internal invariant | Intended, but the director asked whether it should stay that way. See the first task of the next session |
+| Unchanged snapshot repeats stored as rows | Described in its own section above. Decide with the measured row counts in hand, not before |
+| `/health` asserts no internal invariant | Intended, but the director asked whether it should stay that way. Still open; see the section on it above |
 
-### The weekday crypto capture is scheduled
+### The weekday crypto capture is scheduled, aligned to the hour
 
 `scripts/measure_crypto_rate.py` counts top of book updates and trades per UTC
 hour rather than reporting a single mean, because a busy hour extrapolated to a
 day overstates storage and a quiet one understates it, and both look like a
-measurement. A detached process is waiting to start it at 00:00 UTC on Monday
-2026-08-17 for 24 hours, writing
-`/var/tmp/tradingsys/crypto-rate-weekday.json`.
+measurement.
+
+**Relaunched aligned on 2026-08-16T17:40Z.** The first arming was started by
+elapsed sleep rather than against the clock, so it would have begun at
+00:30:17Z and produced two half-length buckets at the ends of the series. The
+script buckets by absolute `%Y-%m-%dT%H`, so that would have left Monday hour 00
+reading at roughly half its true rate with a second half-hour of it filed under
+Tuesday. This measurement sizes retention, which is decided once, and a dataset
+with two half-length buckets at its ends is a trap for whoever reads it later.
+
+| Property | Value |
+|---|---|
+| PID | 34322, own session, detached, cwd is the repository |
+| Starts | 2026-08-16T23:59:30Z, thirty seconds early so the socket is streaming before the hour turns |
+| Runs for | 24.01 hours |
+| Ends | 2026-08-18T00:00:06Z |
+| Writes | `/var/tmp/tradingsys/crypto-rate-weekday.json`, log beside it |
+
+**Monday 2026-08-17 hours 00 through 23 are therefore all complete.** The series
+also carries two slivers that are to be discarded rather than averaged in: about
+30 seconds filed under Sunday hour 23, and about 6 seconds under Tuesday hour 00.
+They are obvious at a glance because they are seconds rather than half hours,
+which is the point of aligning it this way.
 
 That process does not survive a host restart, since WSL2 stops with it. If the
-file is absent after Tuesday, relaunch with:
+JSON file is absent after Tuesday, the capture did not run. Relaunching then
+means picking the next Monday rather than starting immediately, because the whole
+purpose is a weekday profile:
 
 ```bash
-uv run python scripts/measure_crypto_rate.py --hours 24 \
-  --out /var/tmp/tradingsys/crypto-rate-weekday.json
+sleep_for=$(( $(date -u -d '<next Monday> 00:00:00' +%s) - $(date -u +%s) - 30 ))
+setsid nohup bash -c "sleep ${sleep_for}; exec uv run python \
+  scripts/measure_crypto_rate.py --hours 24.01 \
+  --out /var/tmp/tradingsys/crypto-rate-weekday.json" \
+  > /var/tmp/tradingsys/crypto-rate-weekday.log 2>&1 &
 ```
 
 **None of the crypto rate samples taken so far may be used to size retention.**
-There are three, all from Sunday 2026-08-16, and they contradict each other by
-a factor of four on the instrument ratio. They are recorded to show that the
+There are three, all from Sunday 2026-08-16, and they contradict each other by a
+factor of four on the instrument ratio. They are recorded to show that the
 question is open, not to be averaged, interpolated, or picked from:
 
 | Sample | BTC quotes/s | ETH quotes/s | ETH as a multiple of BTC |

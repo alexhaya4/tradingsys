@@ -236,6 +236,91 @@ class TestTheReadmeDoesNotDrift:
         assert "set -a" in body
 
 
+def function_body(name: str) -> str:
+    """The text of one shell function, so a rule can be scoped to the step it governs."""
+    body = SCRIPT.read_text()
+    start = body.index(f"\n{name}() {{\n")
+    return body[start : body.index("\n}\n", start)]
+
+
+SHELL_FILES = (*sorted(REPO_ROOT.glob("scripts/*.sh")), WORKFLOW)
+
+
+class TestChecksDoNotDiscardTheirEvidence:
+    """A check that cannot say why it failed is worse than no check at all.
+
+    CI run 31939779488 failed on ``curl /metrics | grep -q '^tradingsys_build_info'``
+    and the log could not distinguish a refused connection from an HTTP error from a
+    broken pipe from a body that genuinely lacked the series. Classifying it cost a
+    re-run of the pipeline rather than a reading of the log.
+
+    That pipeline had a second defect. ``grep -q`` exits at its first match, so a curl
+    still writing takes EPIPE and exits 23, and under ``pipefail`` that fails a check
+    whose pattern was in fact present. The series looked for is the first one in the
+    payload, which makes the window as wide as it can be. Verified by reproduction:
+    curl exits 23 and prints "Failure writing output to destination". It is a latent
+    false negative, and the CI-never-ran defect already established that a check
+    trusted for more than it does is the expensive kind.
+    """
+
+    @pytest.mark.parametrize("path", SHELL_FILES, ids=lambda p: p.name)
+    def test_no_fetch_is_piped_into_a_matcher(self, path: Path) -> None:
+        piped = [
+            line
+            for line in path.read_text().splitlines()
+            if not line.strip().startswith("#")
+            and re.search(r"curl\b[^|]*\|\s*(grep|rg|awk|sed|jq|head|tail)\b", line)
+        ]
+        assert not piped, (
+            f"{path.name} pipes a fetch into a matcher again. Capture the body first, "
+            f"then match it, so a transport failure and a content failure are told "
+            f"apart and neither `grep -q` nor `pipefail` can fail a passing check: "
+            f"{piped}"
+        )
+
+    def test_a_transport_failure_names_curls_own_status(self) -> None:
+        helper = function_body("http_get")
+        assert "curl exited" in helper, (
+            "http_get must report curl's exit status, or a refused connection is "
+            "indistinguishable from a body that lacked the pattern"
+        )
+
+    def test_the_probe_fetches_through_the_helper(self) -> None:
+        probe = function_body("probe_endpoints")
+        assert "curl" not in probe, (
+            "probe_endpoints should fetch through http_get so every probe gets the "
+            "same failure reporting"
+        )
+        assert probe.count("http_get") == 2, "one fetch for the loop, one for /metrics"
+
+    def test_the_metrics_probe_reports_what_it_actually_received(self) -> None:
+        probe = function_body("probe_endpoints")
+        assert "${#HTTP_BODY}" in probe, "the failure must state how many bytes came back"
+        assert "head -20 <<<" in probe, "the failure must show the start of the body"
+
+    def test_the_metrics_probe_does_not_retry(self) -> None:
+        # Readiness passes before this runs, and /ready and /metrics are two routes on
+        # one app over one registry that is built before the port is bound. If the port
+        # answers, the series is present. A retry could therefore only hide a real
+        # defect, so its absence is a rule rather than an oversight.
+        probe = function_body("probe_endpoints")
+        for construct in ("sleep", "while", "until"):
+            assert construct not in probe, (
+                f"probe_endpoints has grown a `{construct}`, which means it retries. "
+                f"A metric absent after readiness passed is a defect, not a wait."
+            )
+
+    def test_the_prometheus_poll_keeps_the_reason_it_failed(self) -> None:
+        # This one legitimately polls, so it must not abort on the first failure, but
+        # it must still be able to say why it never succeeded.
+        poll = function_body("check_prometheus")
+        assert "2>/dev/null" not in poll, (
+            "check_prometheus discards curl's error again, so a prometheus that never "
+            "answered would time out reporting an empty document and no reason"
+        )
+        assert "curl exit" in poll
+
+
 class TestCiRunsTheSameScript:
     def test_the_workflow_exists(self) -> None:
         assert WORKFLOW.is_file()
