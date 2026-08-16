@@ -335,7 +335,39 @@ be shown to add out-of-sample edge over the macro and trend layers, it does not
 ship. Sentiment scoring that looks plausible but does not improve the equity
 curve is decoration.
 
-### 5.5 Overfitting controls
+### 5.5 Holding period constraint on the crypto leg
+
+Perpetual funding is charged every eight hours on notional, and risk is
+notional times the stop distance, so funding cost as a fraction of the
+per-trade risk budget is the funding rate divided by the stop distance. That
+ratio does not depend on account size. Measured on Bybit ETH/USDT over 600
+settlements spanning 199.7 days to 2026-08-16: at a 1 percent stop, one day of
+holding costs 0.43 percent of one R at mean rates and 2.95 percent at 95th
+percentile rates; seven days costs 3.0 percent and 20.6 percent respectively.
+
+Two consequences bind strategy design and are not advisory:
+
+- **Every crypto strategy declares a maximum holding period, and the funding
+  drag implied by it must be a stated and bounded fraction of that strategy's
+  expected edge.** A strategy whose expected edge is not stated cannot satisfy
+  this, which is the intent: the cost is knowable in advance and must be
+  budgeted for in advance.
+- **Tight stops and long holds are incompatible on perpetuals.** Halving the
+  stop distance doubles the notional carried per unit of risk and doubles the
+  funding drag with it. A design that pairs a sub-1 percent stop with a
+  multi-day hold is rejected at design time rather than discovered in the
+  backtest.
+
+Phase 3 reports funding cost as a first-class result line for every crypto
+backtest, beside net return and drawdown, never as a footnote or an aggregate
+buried in total costs. Results must be reported both gross and net of funding
+so the size of the effect is visible rather than absorbed. **If a crypto
+strategy is profitable only when funding is ignored, it is not profitable.**
+
+The forex leg is unaffected: swap is charged at rollover on a different basis
+and is covered by the cost model in section 7.
+
+### 5.6 Overfitting controls
 
 Mandatory, not advisory:
 
@@ -448,9 +480,11 @@ bid-ask, slippage model calibrated against observed fills, commission, swap and
 funding. Walk-forward harness. Performance and risk metrics reporting.
 
 *Exit criteria:* Engine reproduces a known trade sequence exactly. Cost model
-validated against real historical spreads. Look-ahead bias tested for
-explicitly, including a deliberate look-ahead injection that the harness must
-detect. Reports include confidence intervals.
+validated against real historical spreads. Funding charged per settlement on
+the venue's own schedule rather than approximated, and reported as its own
+result line for every crypto run, gross and net, per section 5.5. Look-ahead
+bias tested for explicitly, including a deliberate look-ahead injection that
+the harness must detect. Reports include confidence intervals.
 
 ### Phase 4a: Macro event signals
 Economic calendar ingestion, surprise computation, event-to-direction mapping

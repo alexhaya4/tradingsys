@@ -88,13 +88,13 @@ class TestSecretRejection:
         # merely the shape of the data.
         clean = {
             "database": {"host": "db", "port": 5432, "user": "tradingsys"},
-            "venues": {"forex": {"enabled": True, "account_id": "5325402"}},
+            "venues": {"forex": {"enabled": True, "account_id": "9999999"}},
         }
         reject_secrets_from_files(clean, Settings, "base.toml")
 
         contaminated = {
             "database": {"host": "db", "port": 5432, "user": "tradingsys"},
-            "venues": {"forex": {"enabled": True, "account_id": "5325402", "client_secret": "x"}},
+            "venues": {"forex": {"enabled": True, "account_id": "9999999", "client_secret": "x"}},
         }
         with pytest.raises(SecretInConfigFileError, match=r"venues\.forex\.client_secret"):
             reject_secrets_from_files(contaminated, Settings, "base.toml")

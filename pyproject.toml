@@ -83,6 +83,9 @@ ignore = [
 "migrations/*" = ["ERA001"]
 # Implementing an interface means accepting every declared parameter, used or not.
 "tests/venues/conforming.py" = ["ARG002"]
+# Command line tools report to whoever ran them, which is what stdout is for. The
+# application itself still logs through structlog and never prints.
+"scripts/*.py" = ["T201"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"

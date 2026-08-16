@@ -300,7 +300,7 @@ class TestValidationRules:
         assert settings.venues.forex is not None
         assert settings.venues.forex.has_credentials
         account_id, credentials = settings.venues.forex.require_credentials()
-        assert account_id == "5325402"
+        assert account_id == "9999999"
         assert credentials.client_id.get_secret_value() == "client-id"
         assert credentials.client_secret.get_secret_value() == "client-secret"
         assert credentials.access_token.get_secret_value() == "access-token"
@@ -568,7 +568,7 @@ token_refresh_margin_seconds = 259200.0
 
 # The five variables an enabled forex venue needs, as the environment supplies them.
 FOREX_CREDENTIALS = {
-    "TRADINGSYS_VENUES__FOREX__ACCOUNT_ID": "5325402",
+    "TRADINGSYS_VENUES__FOREX__ACCOUNT_ID": "9999999",
     "TRADINGSYS_VENUES__FOREX__CLIENT_ID": "client-id",
     "TRADINGSYS_VENUES__FOREX__CLIENT_SECRET": "client-secret",
     "TRADINGSYS_VENUES__FOREX__ACCESS_TOKEN": "access-token",

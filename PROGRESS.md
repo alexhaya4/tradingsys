@@ -391,6 +391,23 @@ rather than treated as a constant, and the phase 4 backtester must charge
 funding on the actual settlement schedule. The funding anchor is already read
 from the venue for exactly that reason.
 
+### Commits are not GPG signed, deliberately
+
+Decided by the director on 2026-08-16, recorded here so it is not reopened
+every session.
+
+GPG cannot reach a TTY in this environment, so signing would need an agent
+with a cached passphrase or a passphraseless key kept on disk. On a private
+single-author repository that buys no security: a signature proves the commit
+came from the key holder, and there is one author, one machine, and no second
+party to whom that proof is addressed. The workaround would be a moving part
+that fails at inconvenient times and protects against nothing that is actually
+in the threat model.
+
+If the repository ever gains a second author or becomes public, this decision
+is worth revisiting, because at that point signatures start proving something
+to someone.
+
 ### Open items carried into the rest of phase 2
 
 | Item | Why it matters |
