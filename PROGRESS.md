@@ -756,6 +756,64 @@ fill data, which does not exist until execution and paper trading. At a 5 pip st
 pip of slippage would add twenty percentage points, which is why the conclusion there
 is robust; at 20 pips it would add five, which is tolerable but not free.
 
+### The spread figures are a lower bound, and the NFP test says why
+
+**Tested 2026-08-17 against the 2026-08-07 13:30 UTC non-farm payrolls release**, at the
+director's challenge that a median of 0.000 pips through NFP would not be believable.
+
+| EUR/USD window | ticks | median | p95 | max |
+|---|---|---|---|---|
+| quiet, 12:00 +30m | 1808 | 0.000 | 0.200 | 1.100 |
+| pre release, 13:25 +5m | 402 | 0.000 | 0.200 | 0.300 |
+| release minute, 13:30 +1m | 105 | 0.000 | 0.100 | 0.300 |
+| 13:31 +4m | 381 | 0.000 | 0.000 | 0.100 |
+| 13:35 +25m | 2163 | 0.000 | 0.100 | 0.500 |
+
+**The median does stay at 0.000 through the release.** The method was checked before the
+data was blamed. The way exact timestamp pairing could lie is by discarding fast
+moments, leaving a sample biased toward calm; measured, pairing coverage is 92.1 percent
+in the quiet window, 92.9 percent in the release minute and 95.9 percent over the five
+minutes after, so it does not collapse and the sample is not selected for calm.
+
+**So the explanation is the account, not the arithmetic.** This is a demo, and a demo
+feed is not obliged to reproduce live pricing. The figures are treated as a **lower
+bound on live spread** and phase 3 must not rest its cost model on them.
+
+The direction of the error is known and it does not overturn anything: real spreads can
+only be wider, so scalping is at least as dead as measured and the 3 percent at a 20 pip
+stop can only rise. The next step that does not need a live account is to check whether
+Dukascopy, a different feed, widens at NFP where this one does not. That answers whether
+zero widening is plausible at all without letting a research-only number into an
+execution cost model.
+
+### Slippage, and what it would take to measure
+
+Not in the cost figures, and stated rather than omitted. It exists only in fills, and
+this system has never submitted an order, so it is phase 6 or phase 7 data by
+construction: recorded fills carrying the quote at submission, the fill price, order
+type, size and instant, so slippage can be separated from spread and attributed to
+conditions.
+
+At a 20 pip stop one pip of slippage is 5 percent of risk, comparable to the entire
+commission cost, so it is the same order of magnitude as a term that is measured. Phase
+3's cost model states it as an explicit unmeasured term: an omitted term reads as zero,
+and zero is the one value it certainly does not have.
+
+### Reading the account balance, and why a cent account needs it
+
+`scripts/check_venue_assumptions.py` now reports the balance the venue states, converted
+by the venue's own `moneyDigits` exponent, plus the deposit asset. Verified against the
+Pepperstone demo: **balance 200 USD, moneyDigits 2**, which matches the funded amount, so
+the conversion is right on an account whose answer is already known.
+
+This exists for the ProCent test. A cent account may denominate equity differently, and
+feeding the sizing screen a number that means something other than what it thinks would
+size every position wrongly by a constant factor while looking entirely plausible. The
+venue publishes the exponent rather than leaving it to be inferred, and the script now
+asserts that it is present, that the balance is positive, and that the deposit asset is
+the currency the risk policy assumes. If ProCent reports something other than USD or a
+balance a hundred times the deposit, the script fails rather than proceeding.
+
 ### What the cost measurement changes about the broker question
 
 **It does not close it. It sharpens it, and moves the target.**

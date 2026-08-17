@@ -44,6 +44,8 @@ from tradingsys.venues.ctrader.connection import (
 from tradingsys.venues.ctrader.messages.OpenApiMessages_pb2 import (
     ProtoOAGetTrendbarsReq,
     ProtoOAGetTrendbarsRes,
+    ProtoOATraderReq,
+    ProtoOATraderRes,
 )
 from tradingsys.venues.ctrader.messages.OpenApiModelMessages_pb2 import ProtoOATrendbarPeriod
 from tradingsys.venues.ctrader.symbols import fetch_catalogue, fetch_instrument
@@ -54,6 +56,8 @@ if TYPE_CHECKING:
 
 GET_TRENDBARS_REQ: Final = 2137
 GET_TRENDBARS_RES: Final = 2138
+TRADER_REQ: Final = 2121
+TRADER_RES: Final = 2122
 
 TRENDBAR_PRICE_SCALE: Final = Decimal(100_000)
 """Trendbar prices are published as integers scaled by ten to the fifth.
@@ -155,6 +159,45 @@ def settings_from_environment() -> ForexVenueSettings:
     )
 
 
+async def account_balance(
+    connection: CTraderConnection, catalogue: SymbolCatalogue
+) -> tuple[Decimal, str, int]:
+    """The balance the venue reports, in its own units, converted by its own exponent.
+
+    `moneyDigits` is the venue's statement of how its monetary values are scaled: a real
+    balance is the reported integer divided by ten to that power. It is read rather than
+    assumed because a cent account may denominate equity differently from a standard
+    one, and feeding a number that means something other than what the sizing screen
+    thinks it means would size every position wrongly by a constant factor while looking
+    entirely plausible.
+
+    Returns:
+        The balance, the deposit asset name, and the exponent the venue reported.
+
+    Raises:
+        CheckFailedError: The venue omitted `moneyDigits`. Its absence is not a licence
+            to assume two: the whole point of reading it is that this account type may
+            not be the one the assumption was formed on.
+    """
+    request = ProtoOATraderReq()
+    request.ctidTraderAccountId = connection.ctid_trader_account_id
+    response = await connection.request(TRADER_REQ, request, ProtoOATraderRes(), TRADER_RES)
+    assert isinstance(response, ProtoOATraderRes)
+    trader = response.trader
+
+    if not trader.HasField("moneyDigits"):
+        raise CheckFailedError(
+            "the venue reported a balance without moneyDigits, so its denomination is "
+            "unknown. Refusing to guess: a factor of a hundred here sizes every position "
+            "wrongly and looks correct."
+        )
+    exponent = trader.moneyDigits
+    with exact_context():
+        balance = Decimal(trader.balance) / (Decimal(10) ** exponent)
+    asset = catalogue.asset_name(trader.depositAssetId, symbol_name="account deposit asset")
+    return balance, asset, exponent
+
+
 async def last_close(connection: CTraderConnection, symbol_id: int, digits: int) -> Decimal:
     """The close of the most recent completed one minute bar, as a venue price."""
     now_ms = int(time.time() * 1000)
@@ -182,6 +225,22 @@ async def last_close(connection: CTraderConnection, symbol_id: int, digits: int)
     return price.quantize(Decimal(1).scaleb(-digits))
 
 
+def check_metadata_shape(report: Report, name: str, instrument: Instrument) -> None:
+    """Assert the fields the sizing arithmetic depends on are present and sane."""
+    report.check(f"{name} publishes price digits", instrument.price_precision > 0)
+    report.check(
+        f"{name} publishes a pip size distinct from its tick",
+        instrument.pip_size is not None and instrument.pip_size > instrument.price_increment,
+        f"pip={instrument.pip_size} tick={instrument.price_increment}",
+    )
+    report.check(f"{name} publishes a positive minimum volume", instrument.min_quantity > 0)
+    report.check(f"{name} publishes a positive volume step", instrument.quantity_increment > 0)
+    report.check(
+        f"{name} publishes a trading schedule",
+        len(instrument.schedule.sessions) > 0 or instrument.schedule.always_open,
+    )
+
+
 async def run() -> int:
     config = settings_from_environment()
     report = Report(passed=[], failed=[])
@@ -207,6 +266,15 @@ async def run() -> int:
         catalogue: SymbolCatalogue = await fetch_catalogue(connection)
         report.check("the venue publishes a symbol catalogue", len(catalogue.symbols) > 0)
 
+        balance, deposit_asset, exponent = await account_balance(connection, catalogue)
+        print(f"  balance {balance} {deposit_asset} (moneyDigits={exponent})")
+        report.check("the venue reports a positive account balance", balance > 0, str(balance))
+        report.check(
+            "the deposit asset is the account currency the risk policy assumes",
+            deposit_asset == "USD",
+            f"deposit asset is {deposit_asset}, so every risk figure needs a stated rate",
+        )
+
         for name in FX_SYMBOLS:
             present = name in catalogue.names()
             report.check(f"{name} is listed on this account", present)
@@ -215,21 +283,7 @@ async def run() -> int:
             instrument = await fetch_instrument(connection, catalogue, name, currencies)
             instruments[name] = instrument
 
-            report.check(f"{name} publishes price digits", instrument.price_precision > 0)
-            report.check(
-                f"{name} publishes a pip size distinct from its tick",
-                instrument.pip_size is not None
-                and instrument.pip_size > instrument.price_increment,
-                f"pip={instrument.pip_size} tick={instrument.price_increment}",
-            )
-            report.check(f"{name} publishes a positive minimum volume", instrument.min_quantity > 0)
-            report.check(
-                f"{name} publishes a positive volume step", instrument.quantity_increment > 0
-            )
-            report.check(
-                f"{name} publishes a trading schedule",
-                len(instrument.schedule.sessions) > 0 or instrument.schedule.always_open,
-            )
+            check_metadata_shape(report, name, instrument)
 
             price = await last_close(
                 connection, catalogue.light(name).symbolId, instrument.price_precision

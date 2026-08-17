@@ -628,6 +628,90 @@ worse rather than better and rules out more of the instrument universe at this
 capital. `SPEC.md` section 6 forbids raising a limit to fit a venue one level up, and
 the same rule applies here.
 
+### Reasoning error: treating cost and sizing as one constraint
+
+Recorded at the director's instruction on 2026-08-17, because the conflation would
+otherwise be repeated by anyone reading the exchange.
+
+The instruction was: measure the cost of a 5 pip stop, and if it is a large fraction
+of risk, stop pursuing brokers for forex at this capital. The premise was that
+scalping was the only class that cleared the sizing screen at 200 USD, so if costs
+killed scalping they killed forex.
+
+**The premise conflated two constraints that turn out to be orthogonal.** Cost as a
+fraction of risk cancels position size exactly: spread cost, commission and risk all
+scale linearly with units, so the ratio is 12 percent at a 5 pip stop whether the
+position is 10 units or 100,000. Verified across four orders of magnitude. Sizing
+eligibility, by contrast, depends only on capital and the venue's step and not at all
+on cost.
+
+So they resolve independently, and killing the tight stop does not kill forex. It
+moves the target: cost rules out stops tighter than about 20 pips, and sizing then
+asks what capital a 20 pip stop needs, which is 40 USD on a 10 unit step. The class to
+aim at became 20 pip intraday rather than 5 pip scalping, and the broker requirement
+tightened from 200 units to 50.
+
+**The general shape of the error is worth keeping.** Two constraints that both bind on
+the same decision are not necessarily the same constraint, and the tell here was that
+one of them cancelled a variable the other depended on. Had the instruction been
+followed as written, the demos would have been abandoned on a conclusion that the
+measurement contradicts.
+
+### Slippage is an unmeasured term and must be stated as one
+
+Directed 2026-08-17. The cost measurement covers spread and commission only.
+
+**Why it is not measured yet.** Slippage is the difference between the price an order
+was sent at and the price it filled at. It exists only in fills, and this system has
+never submitted an order: execution is phase 6 and paper trading is phase 7. Nothing
+in historical tick data or venue metadata contains it, so no amount of work before
+phase 6 produces the number.
+
+**What it would take.** Recorded fills with, for each one, the quote at submission, the
+venue's fill price, the order type, the size, and the instant, so that slippage can be
+separated from spread and attributed to conditions such as session, release proximity,
+and size. That is a phase 6 or phase 7 dataset by construction.
+
+**What phase 3 must do until then.** The backtest cost model states slippage as an
+explicit unmeasured term rather than omitting it. An omitted term reads as zero, and
+zero is the one value it certainly does not have. At a 20 pip stop, one pip of
+slippage is 5 percent of risk, which is comparable to the entire commission cost, so
+the term is the same order of magnitude as one that is measured. A cost model that
+reports spread and commission precisely and slippage not at all is more misleading
+than one that carries a stated range, because it invites the reader to believe the
+total is complete.
+
+### The demo spread figures are a lower bound, not a measurement of live pricing
+
+Found 2026-08-17 while testing the earlier spread result against a high impact release.
+
+The director's challenge was that a median spread of 0.000 pips on a raw account is
+believable but a median that stays 0.000 through a non-farm payrolls release would
+not be. It does stay 0.000, on EUR/USD through the 2026-08-07 13:30 UTC release.
+
+**The method was checked first and is sound.** The obvious way for exact timestamp
+pairing to lie is by discarding fast moments, when bid and ask might tick milliseconds
+apart, leaving a sample biased toward calm. Measured: pairing coverage is 92.1 percent
+in a quiet window, 92.9 percent in the release minute, and 95.9 percent over the five
+minutes after it. Coverage does not collapse, so the surviving sample is not selected
+for calm and the result is real data.
+
+**The remaining explanation is the account.** This is a demo, and a demo feed is not
+obliged to reproduce live pricing. Zero widening through NFP is far more consistent
+with a feed that does not model it than with a live raw spread book.
+
+So the demo spread figures are treated as a **lower bound on live spread**, and phase 3
+must not rest its cost model on them. The direction of the error is known, which is
+worth something: real spreads can only be wider, so scalping is at least as dead as
+measured, and the 3 percent at a 20 pip stop can only rise.
+
+**How to settle it without a live account.** Dukascopy tick data carries bid and ask
+from a different venue, and `core/provenance.py` marks it research only, so it cannot
+supply a cost estimate for Pepperstone. It can answer a narrower question that is not
+about cost at all: whether any real feed shows widening at NFP. If Dukascopy widens
+sharply where the demo does not, the demo feed is confirmed unrepresentative without
+any research-only number leaking into an execution model.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited
