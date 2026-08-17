@@ -565,6 +565,69 @@ The same reasoning applies to the stale claim recovery already built into
 `backfill_hours`: an hour left `in_progress` by a dead or frozen worker is reclaimed
 on wall clock age, not on any belief about whether that worker is still running.
 
+### The quantisation tolerance is 5 percent, derived rather than chosen
+
+Directed by the director on 2026-08-17: the previous 10 percent was written into a
+prompt without analysis when BTC was excluded, and had become load-bearing.
+
+**The structure of the error.** Position size is rounded **down** to the venue's
+quantity step, so realised risk is always at or below intended risk. The error is
+therefore one-directional: the stated limit is never breached, only undershot. It is
+also bounded, because the shortfall is less than one step: as a fraction of the risk
+budget it is less than `step / intended`, which is the deviation the screen reports.
+
+So realised per-trade risk lies in `((1 - d) x r, r]` where `r` is the stated limit
+and `d` the deviation. Safety is not what binds, since nothing exceeds `r`. What
+breaks is the **truth of the statement**.
+
+**The derivation.** `SPEC.md` section 6 states the per-trade ceiling as **1.0
+percent** and the hard cap as **2.0 percent**, both to one decimal place. A quantity
+stated to one decimal place asserts that the true value lies within half a unit of
+the last place: 1.0 percent asserts the interval [0.95, 1.05].
+
+Realised risk lies in `((1 - d) x 1.0, 1.0]`. For every attainable value to be
+truthfully described by the stated figure, the lower end must not fall out of that
+interval:
+
+```
+(1 - d) x 1.0  >=  0.95
+             d  <=  0.05
+```
+
+**The tolerance is 5 percent.** Above it, a system that says it risks 1.0 percent per
+trade is taking an amount that no longer rounds to 1.0 percent, which is the precise
+sense in which the limit stops meaning what it says.
+
+**What it costs.** If the fractional part of intended-over-step is uniform, the mean
+shortfall is half a step, so expected deployed risk is `1 - d/2`, or 97.5 percent of
+intended. The system systematically forgoes about 2.5 percent of its intended
+exposure and therefore about 2.5 percent of its expected edge. Bounded and stated,
+in the manner section 5.5 requires of funding.
+
+**Why not the other framings**, recorded so they are not relitigated:
+
+*Risk-adjusted performance is unaffected, and that is not the point.* Rounding down
+scales exposure, so expected return and volatility fall together and the Sharpe ratio
+is untouched. The concern is whether the stated limit is true, not whether the
+account is efficient.
+
+*A statistical framing gives a weaker bound and rests on a number that does not
+exist.* Requiring the risk unit to be stable enough to measure an expectancy to
+within ten percent relative admits roughly 20 percent deviation, but it depends on an
+assumed expectancy, and no strategy exists yet to supply one. A threshold derived
+from an assumption is not derived.
+
+*Computing realised R per trade from actual fills fixes measurement, not the
+statement.* The audit log does record actual size, so performance reporting can use
+exact realised risk. It does not help an operator reading "1 percent per trade" in
+the runbook, who must be able to trust the figure without recomputing it.
+
+**It moved against convenience, which is the test that it was derived.** 5 percent is
+tighter than the 10 percent it replaces, so it makes the Pepperstone minimum lot
+worse rather than better and rules out more of the instrument universe at this
+capital. `SPEC.md` section 6 forbids raising a limit to fit a venue one level up, and
+the same rule applies here.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited

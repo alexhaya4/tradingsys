@@ -453,6 +453,13 @@ as a constant anywhere in the risk engine. A limit expressed in currency is a
 limit that is wrong at every account size except the one it was written for, and
 it fails silently rather than loudly when the account changes.
 
+**Quantisation tolerance is 5 percent, and is derived.** Position size is rounded
+down to the venue's quantity step, so realised risk is one directional and bounded by
+one step below intended. A limit stated as 1.0 percent asserts the interval
+[0.95, 1.05], so the deviation that keeps that statement true is at most 5 percent.
+The derivation is in `docs/DECISIONS.md`. Like every other limit here it is not
+raised to fit a venue.
+
 **The strategy implication is reported, not just the verdict.** An exclusion list
 says which instruments cannot be traded. It does not say what the account can
 still do, and that is the question an operator actually has. For a given balance
@@ -500,6 +507,37 @@ flagged.
 
 **Reconciliation.** Position and balance state reconciled against the venue on
 a fixed interval. Any mismatch halts trading and alerts immediately.
+
+### 6.2 What each strategy class costs in capital
+
+Capital independence means the system works at any balance. It does not mean every
+balance can trade everything: the venue's quantity grid is a floor the system cannot
+size below, and that floor sets a minimum balance per strategy class rather than a
+minimum balance overall.
+
+Measured 2026-08-17 on EUR/USD at 1.15692, at 1 percent per-trade risk and the 5
+percent quantisation tolerance above. The balance below is where the class becomes
+eligible; the figures scale linearly with the venue's step and with the stop
+distance, so they are a shape rather than a table to be trusted verbatim.
+
+| Venue minimum and step | Scalp, 5 pips | Intraday, 20 pips | Swing, 50 pips | Macro, 80 pips |
+|---|---|---|---|---|
+| 1000 units, 0.01 lot | 1,000 USD | 4,000 USD | 10,000 USD | 16,000 USD |
+| 100 units, 0.001 lot | 100 USD | 400 USD | 1,000 USD | 1,600 USD |
+| 10 units, 0.0001 lot | 10 USD | 40 USD | 100 USD | 160 USD |
+
+**At 200 USD on a 1000 unit minimum, no forex strategy class is eligible.** That is a
+capital finding, not an engineering failure. The system sizes correctly and refuses
+correctly; what it cannot do is invent size below the venue grid.
+
+The relationship is `balance = step x stop_in_pips x 0.2` for a USD quoted pair at
+these settings, so the three ways to move it are a smaller venue step, a tighter
+stop, or more capital. Raising the risk limit or the quantisation tolerance is not on
+that list, for the reason section 6 gives.
+
+The crypto leg is unaffected: ETH/USDT perpetual clears at this capital because its
+step is a far smaller fraction of the position the budget buys.
+
 
 ---
 

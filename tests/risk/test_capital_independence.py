@@ -48,6 +48,10 @@ STOPS = st.decimals(
 
 SLOW = settings(max_examples=250, suppress_health_check=[HealthCheck.function_scoped_fixture])
 
+DEVIATION_LIMIT = Decimal("0.05")
+"""The derived quantisation tolerance. See docs/DECISIONS.md for why it is 5 percent
+and not a number someone liked the look of."""
+
 RELATIVE_TOLERANCE = Decimal("1e-30")
 """Slack for the last places of 34 digit decimal arithmetic, and for nothing else.
 
@@ -67,7 +71,7 @@ class TestTheArithmeticHoldsAtEveryBalance:
             equity=Money(balance, USD),
             risk_fraction=risk,
             stop_distance=stop,
-            max_risk_deviation=Decimal("0.10"),
+            max_risk_deviation=DEVIATION_LIMIT,
         )
         assert verdict.risk_budget == balance * risk
 
@@ -85,7 +89,7 @@ class TestTheArithmeticHoldsAtEveryBalance:
             equity=Money(balance, USD),
             risk_fraction=risk,
             stop_distance=stop,
-            max_risk_deviation=Decimal("0.10"),
+            max_risk_deviation=DEVIATION_LIMIT,
         )
         with exact_context():
             loss_at_stop = verdict.intended_quantity * stop * price
@@ -103,7 +107,7 @@ class TestTheArithmeticHoldsAtEveryBalance:
             equity=Money(balance, USD),
             risk_fraction=risk,
             stop_distance=stop,
-            max_risk_deviation=Decimal("0.10"),
+            max_risk_deviation=DEVIATION_LIMIT,
         )
         assert verdict.tradeable_quantity <= verdict.intended_quantity
         remainder = verdict.tradeable_quantity % instrument.quantity_increment
@@ -115,7 +119,7 @@ class TestTheArithmeticHoldsAtEveryBalance:
         self, balance: Decimal, risk: Decimal, stop: Decimal
     ) -> None:
         instrument = eurusd()
-        limit = Decimal("0.10")
+        limit = DEVIATION_LIMIT
         verdict = evaluate_eligibility(
             instrument,
             price=Decimal("1.10"),
@@ -149,7 +153,7 @@ class TestTheArithmeticHoldsAtEveryBalance:
             equity=Money(balance, USD),
             risk_fraction=risk,
             stop_distance=stop,
-            max_risk_deviation=Decimal("0.10"),
+            max_risk_deviation=DEVIATION_LIMIT,
         )
         at_ceiling = evaluate_eligibility(
             instrument,
@@ -157,7 +161,7 @@ class TestTheArithmeticHoldsAtEveryBalance:
             equity=Money(balance, USD),
             risk_fraction=risk,
             stop_distance=verdict.widest_affordable_stop,
-            max_risk_deviation=Decimal("0.10"),
+            max_risk_deviation=DEVIATION_LIMIT,
         )
         difference = abs(at_ceiling.intended_quantity - instrument.min_quantity)
         assert difference <= instrument.min_quantity * Decimal("1e-20")
@@ -177,7 +181,7 @@ class TestScalingIsExact:
             "price": Decimal("1.10"),
             "risk_fraction": Decimal("0.01"),
             "stop_distance": Decimal("0.01"),
-            "max_risk_deviation": Decimal("0.10"),
+            "max_risk_deviation": DEVIATION_LIMIT,
         }
         small = evaluate_eligibility(instrument, equity=Money(balance, USD), **arguments)
         large = evaluate_eligibility(instrument, equity=Money(balance * factor, USD), **arguments)
@@ -207,7 +211,7 @@ class TestScalingIsExact:
                 equity=Money(balance, USD),
                 risk_fraction=Decimal("0.01"),
                 stop_distance=stop,
-                max_risk_deviation=Decimal("0.10"),
+                max_risk_deviation=DEVIATION_LIMIT,
             ).widest_affordable_stop
             for stop in (Decimal("0.001"), Decimal("0.01"), Decimal("0.1"))
         }
@@ -221,7 +225,7 @@ class TestTheTradeableSetIsDynamic:
     def screen() -> InstrumentScreen:
         return InstrumentScreen(
             risk_fraction=Decimal("0.01"),
-            max_risk_deviation=Decimal("0.10"),
+            max_risk_deviation=DEVIATION_LIMIT,
             reference_stop=Decimal("0.01"),
         )
 
@@ -321,7 +325,7 @@ class TestRefusalsThatAreNotAboutSize:
         with pytest.raises(DomainError, match="not a small account"):
             InstrumentScreen(
                 risk_fraction=Decimal("0.01"),
-                max_risk_deviation=Decimal("0.10"),
+                max_risk_deviation=DEVIATION_LIMIT,
                 reference_stop=Decimal("0.01"),
             ).evaluate(
                 [instrument],
@@ -336,7 +340,7 @@ class TestRefusalsThatAreNotAboutSize:
         with pytest.raises(DomainError, match="has no price"):
             InstrumentScreen(
                 risk_fraction=Decimal("0.01"),
-                max_risk_deviation=Decimal("0.10"),
+                max_risk_deviation=DEVIATION_LIMIT,
                 reference_stop=Decimal("0.01"),
             ).evaluate([instrument], equity=Money(Decimal("200"), USD), prices={})
 
@@ -347,7 +351,7 @@ class TestRefusalsThatAreNotAboutSize:
         with pytest.raises(DomainError, match="conversion rate is required"):
             InstrumentScreen(
                 risk_fraction=Decimal("0.01"),
-                max_risk_deviation=Decimal("0.10"),
+                max_risk_deviation=DEVIATION_LIMIT,
                 reference_stop=Decimal("0.01"),
             ).evaluate(
                 [instrument],
@@ -360,6 +364,6 @@ class TestRefusalsThatAreNotAboutSize:
         with pytest.raises(DomainError, match="not a fraction"):
             InstrumentScreen(
                 risk_fraction=Decimal("200"),
-                max_risk_deviation=Decimal("0.10"),
+                max_risk_deviation=DEVIATION_LIMIT,
                 reference_stop=Decimal("0.01"),
             )

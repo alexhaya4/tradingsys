@@ -683,65 +683,78 @@ skipping one would leave a real hole at every session boundary.
 class recorded in `docs/DECISIONS.md` that scheduling has to verify it fires on wall
 clock time rather than assume a live process implies a live schedule.
 
-### The broker minimum lot investigation
+### The quantisation tolerance, derived, and what it does to the broker question
 
-**Done 2026-08-17. The finding is worse than the earlier report and it corrects it.**
+**Directed by the director on 2026-08-17.** The 10 percent figure was written into a
+prompt without analysis when BTC was excluded and had become load-bearing. It is now
+derived, and the derivation is in `docs/DECISIONS.md`.
 
-**Correction to what I reported on 2026-08-16.** I reported a 20 pip stop ceiling and
-said scalping and intraday trend fit under it while swing and macro did not. The
-ceiling figure is right, but it only measures where position size falls below the
-venue minimum. It does not measure quantisation, and the eligibility screen applies
-both. Run through the screen rather than against the ceiling alone:
+**The answer is 5 percent.** Rounding to the venue grid is one directional, since size
+rounds down, and bounded by one step, so realised risk lies in `((1 - d) x r, r]`.
+Safety never binds, because nothing exceeds `r`. What breaks is the truth of the
+statement: `SPEC.md` section 6 states the limit as 1.0 percent, to one decimal place,
+which asserts [0.95, 1.05], and requiring the lower end to stay inside that gives
+`d <= 0.05`.
 
-| Stop | Intended size | 1000 unit minimum, today |
-|---|---|---|
-| 5 pips | 4000 units | excluded, step is 25 percent of intended |
-| 20 pips | 1000 units | excluded, step is 100 percent of intended |
-| 50 pips | 400 units | excluded, below the minimum |
-| 80 pips | 250 units | excluded, below the minimum |
+It moved **against** convenience. 5 percent is tighter than 10, so it excludes more at
+this capital, which is the test that it was derived rather than fitted.
 
-**At 200 USD on Pepperstone's 1000 unit minimum, no forex strategy class is eligible
-at all.** Not merely macro. For the step to stay inside the 10 percent deviation
-limit the intended size must be at least 10,000 units, which needs a stop of 2 pips
-or tighter, which is inside the spread. Forex is not tradeable on this account under
-the current risk policy, at any stop distance.
+### What each strategy class costs in capital
 
-**How small the minimum has to be.** Same screen, same 200 USD, same limits:
+Now in `SPEC.md` section 6.2 as a specification finding. Computed with the shipped
+eligibility screen and checked at the boundary: eligible at the stated balance,
+excluded one percent below it.
 
-| Venue minimum and step | 5 pips | 20 pips | 50 pips | 80 pips |
+| Venue minimum and step | Scalp 5p | Intraday 20p | Swing 50p | Macro 80p |
 |---|---|---|---|---|
-| 1000 units, 0.01 lot | excluded | excluded | excluded | excluded |
-| 100 units, 0.001 lot | ok | ok | excluded, 25 percent | excluded, 40 percent |
-| 10 units, 0.0001 lot | ok | ok | ok | ok |
-| 1 unit | ok | ok | ok | ok |
+| 1000 units, 0.01 lot, Pepperstone today | 1,000 USD | 4,000 USD | 10,000 USD | 16,000 USD |
+| 100 units, 0.001 lot, "nano" | 100 USD | 400 USD | 1,000 USD | 1,600 USD |
+| 10 units, 0.0001 lot, cent account | 10 USD | 40 USD | 100 USD | 160 USD |
 
-**A nano lot is not enough.** 0.001 lots, which is what the broker comparison sites
-mean by nano, unblocks scalping and intraday and leaves swing and macro excluded on
-quantisation. Macro width stops at this capital need a minimum at or below **10
-units**, which is 0.0001 lots. That is cent account territory rather than nano, and
-it is a different mechanism: a cent account redenominates the contract rather than
-lowering the lot.
+The relationship is `balance = step x stop_in_pips x 0.2` for a USD quoted pair, so
+the three levers are a smaller step, a tighter stop, or more capital.
 
-**What the search could and could not settle.** The 1000 unit minimum is not a
-cTrader platform limit. It is `minVolume` in Pepperstone's own symbol metadata, so a
-different cTrader broker can publish a smaller one and this adapter would need no
-change. Which brokers actually do is not answerable from comparison sites: they are
-marketing pages, they disagree with each other, and one of them contradicted itself
-on whether a broker offers cTrader at all. Candidates that appear repeatedly and
-accept Kenyan clients are IC Markets and RoboForex; IC Markets is the better
-regulated and is not advertised as offering below 0.01 lots, while RoboForex offers a
-0.001 lot cent style account and is regulated in Belize.
+### Which brokers are worth testing, and what each would need to publish
 
-**The only way to settle it is to read the number from the API**, which is exactly
-what `scripts/check_venue_assumptions.py` already does. The cheap next step is to
-open a demo account at a candidate, point the script at it, and read `minVolume`.
-That is an afternoon, needs no code, and produces a fact rather than a claim.
+At 200 USD, the step a broker must publish to clear each class:
 
-**Two decisions this raises, both the director's.** Whether to open demo accounts at
-candidate brokers to measure them, and whether the 10 percent deviation limit is the
-right policy: it is a configured threshold rather than a law, and it is doing as much
-work here as the venue minimum. Relaxing it would change these answers, and SPEC 6
-says a limit is not raised to fit a venue, which is why it was not touched here.
+| Class | Required step | In lots |
+|---|---|---|
+| Scalp, 5 pips | 200 units | 0.002 |
+| Intraday, 20 pips | 50 units | 0.0005 |
+| Swing, 50 pips | 20 units | 0.0002 |
+| Macro, 80 pips | 12.5 units | 0.000125 |
+
+**Nothing in the standard retail lot ladder clears more than scalping at 200 USD.**
+The ladder is 0.01 lots, which is 1000 units and clears nothing, and 0.001 lots, which
+is 100 units and clears scalping only, since intraday needs 50. There is no 0.0005 lot
+tier in ordinary accounts.
+
+**Only a cent account reaches the rest.** A cent account redefines one lot as 1000
+units instead of 100,000, so its 0.01 minimum is 10 units of base currency, which
+clears every class down to 160 USD for macro. That is a different mechanism from a
+smaller nano lot and it is the only configuration that works at this capital.
+
+**The list, in the order worth testing:**
+
+| Broker and account | Why | What settles it |
+|---|---|---|
+| RoboForex ProCent | The only candidate that plausibly combines a cent account with cTrader, so the existing adapter is reused. Regulated in Belize, which is a risk question for the director rather than a technical one | Whether cTrader is offered **on ProCent specifically**. Platform availability is often per account type, and marketing pages list platforms per broker |
+| IC Markets cTrader Raw | Accepts Kenyan clients, better regulated, already speaks our protocol | Expected to publish 1000 units and therefore to clear nothing. Worth one script run to confirm the ladder rather than to discover a surprise |
+| FXOpen Micro Cent | 10 unit step, so the arithmetic works | Lists MT4, MT5, and TickTrader, not cTrader. Only worth pursuing if RoboForex fails and a second adapter is acceptable |
+
+**A caveat on the one class that does clear.** Scalping at a 5 pip stop is eligible by
+the sizing screen at 100 unit steps, and that is a statement about sizing only. A 5
+pip stop leaves round trip spread and commission as a large fraction of the risk
+taken, and none of that has been measured on this account. Eligible is not the same as
+economically viable, and the cost side needs measuring before anyone relies on the
+first column of these tables.
+
+**None of this is settled by reading.** Broker comparison pages are marketing, they
+disagree with each other, and one contradicted itself on whether a broker offers
+cTrader at all. The number that decides it is `minVolume` from the venue's own API,
+which `scripts/check_venue_assumptions.py` already reads. Open the demo, point the
+script at it, read the number.
 
 ### Not a decision yet: unchanged snapshot repeats become tick rows
 

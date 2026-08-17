@@ -67,8 +67,14 @@ FX_SYMBOLS: Final = ("EURUSD", "GBPUSD", "USDJPY", "AUDUSD")
 
 ACCOUNT_EQUITY: Final = Decimal("200")
 RISK_FRACTION: Final = Decimal("0.01")
-MAX_RISK_DEVIATION: Final = Decimal("0.10")
-"""The eligibility screen's tolerance, matching what the crypto half was measured at."""
+MAX_RISK_DEVIATION: Final = Decimal("0.05")
+"""Largest tolerable gap between intended and realised position size.
+
+Derived rather than chosen. Rounding to the venue grid is one directional and bounded
+by one step, so realised risk lies in ((1 - d) x r, r] for a stated limit r. SPEC 6
+states that limit as 1.0 percent, to one decimal place, which asserts the interval
+[0.95, 1.05]; requiring the lower end to stay inside it gives d <= 0.05. The full
+derivation, and the framings rejected on the way to it, are in docs/DECISIONS.md."""
 
 REFERENCE_STOP: Final = Decimal("0.01")
 """Stop distance the verdict is reported at, as a fraction of price.
