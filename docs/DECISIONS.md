@@ -514,6 +514,57 @@ pass is a pass, but a fail is a verdict on one leg rather than on the design, an
 the macro leg has to be made reachable and evaluated before the design is
 abandoned.
 
+### Defect class: a liveness check that proves existence, not correct future action
+
+Named by the director on 2026-08-17 after the crypto capture drifted nine hours
+while every check said it was healthy.
+
+**What happened.** The capture was armed with `sleep N`, where N was computed
+against the wall clock. WSL2 suspended the VM overnight. The process kept its place
+in the sleep while the wall clock advanced, so a capture armed for 23:59:30Z was
+still sleeping at 06:45Z with 7870 seconds to go, and would have fired at 08:57Z.
+
+**Why it was checked twice and passed twice.** Both checks asked whether the process
+existed. `ps` reported a live PID, a live `sleep` child, an owned session, and the
+right working directory. Every one of those was true and none of them was the
+question. The only observable that would have caught it was elapsed time against
+wall clock: four hours of VM uptime behind thirteen hours of the world.
+
+**The class.** A check that confirms a process exists proves nothing about whether
+it will act, or act at the right time. Existence and correct future action are
+different properties, and for anything driven by a timer, a deadline, or a schedule
+it is the second one that matters. Confirming the first and reporting health is how
+a check becomes a source of false confidence rather than assurance.
+
+**The rule.** Wherever this system depends on a timer, a deadline, or a scheduled
+action, the check verifies that the thing will happen at the right time. In
+practice that means comparing the scheduled instant against the wall clock now, not
+inspecting the process that holds it, and it means any waiting is done by re-reading
+the clock rather than by trusting an interval. `scripts/arm_crypto_capture.sh` polls
+the clock every thirty seconds for exactly this reason: a suspend costs one poll of
+lateness rather than the whole of its duration.
+
+**Where this binds before it is rediscovered.** Two places, noted now so they are
+designed rather than repaired.
+
+*Phase 5, the reconciliation loop.* It runs on a fixed interval and its whole
+purpose is to notice divergence between our position state and the venue's. A
+suspended host silently stops reconciling while the process stays up and the health
+endpoint stays green, which is precisely the window in which a divergence would go
+unnoticed. Reconciliation must therefore assert its own recency: the check is when
+the last reconciliation completed relative to now, and a loop that has not run
+within its interval is a fault regardless of whether its task object is alive.
+
+*Phase 7, the thirty day paper run.* Its exit criteria are calendar based. A host
+that suspends for nine hours produces a run that believes it covered thirty days
+and covered less, with a gap that no unhandled exception marks. The run has to
+measure elapsed wall clock coverage rather than count iterations, and a suspension
+gap has to be visible in the record rather than absorbed by it.
+
+The same reasoning applies to the stale claim recovery already built into
+`backfill_hours`: an hour left `in_progress` by a dead or frozen worker is reclaimed
+on wall clock age, not on any belief about whether that worker is still running.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited

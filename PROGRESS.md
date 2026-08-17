@@ -372,7 +372,8 @@ to be brought with evidence rather than resolved quietly.
 | Sizing deliverable, forex half | Complete | Reported below. All four pairs excluded at a 1 percent stop |
 | Capital independence, SPEC 6.1 | Complete | Dynamic screen, property tests over eight orders of magnitude, structural guard against absolute amounts |
 | Resumable Dukascopy backfill | Complete | Queue, runner, HTTP fetcher. Concurrency 3, retries with backoff, failed hours retried not skipped |
-| Instrument registry from venue metadata | Not started | Blocked on the cTrader adapter for the forex half |
+| Instrument registry from venue metadata | Complete | Sync compares before writing and reports drift by field. cTrader source built |
+| Backfill caller | Complete | Queues missing open hours from the instrument's own schedule, then drains |
 | Resumable Dukascopy backfill | Not started | Reader and gap detector are done; the runner over `backfill_hours` is not |
 | 72 hour continuous ingestion run | Not started | Begins once the adapters and the registry are working, and is reported before it starts |
 
@@ -671,10 +672,16 @@ the state machine, and 17 integration tests against real PostgreSQL for the stat
 machine itself, including the atomic claim, the stale claim recovery, and the
 constraints that refuse a complete row with no row count or a failed row with no reason.
 
-**Not yet done:** nothing schedules a backfill run. The runner is a component with no
-caller, and wiring it to a process with a configured range is a separate unit. The
-`backfill_hours` queue is populated by `enqueue`, and `hours_between` builds a range,
-but no scheduled job calls either yet.
+**The caller now exists.** `BackfillJob` in `src/tradingsys/marketdata/backfill_job.py`
+works out which hours are missing during hours the venue was open, queues them, and
+drains the queue. It takes the schedule from the instrument itself, so a broker that
+changes its session hours changes what gets queued on the next registry sync rather
+than on a code change. A partly open hour is queued, because it still holds ticks and
+skipping one would leave a real hole at every session boundary.
+
+**Still not scheduled.** Nothing calls `BackfillJob` on a timer yet, and per the defect
+class recorded in `docs/DECISIONS.md` that scheduling has to verify it fires on wall
+clock time rather than assume a live process implies a live schedule.
 
 ### Not a decision yet: unchanged snapshot repeats become tick rows
 
