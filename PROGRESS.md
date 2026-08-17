@@ -683,6 +683,66 @@ skipping one would leave a real hole at every session boundary.
 class recorded in `docs/DECISIONS.md` that scheduling has to verify it fires on wall
 clock time rather than assume a live process implies a live schedule.
 
+### The broker minimum lot investigation
+
+**Done 2026-08-17. The finding is worse than the earlier report and it corrects it.**
+
+**Correction to what I reported on 2026-08-16.** I reported a 20 pip stop ceiling and
+said scalping and intraday trend fit under it while swing and macro did not. The
+ceiling figure is right, but it only measures where position size falls below the
+venue minimum. It does not measure quantisation, and the eligibility screen applies
+both. Run through the screen rather than against the ceiling alone:
+
+| Stop | Intended size | 1000 unit minimum, today |
+|---|---|---|
+| 5 pips | 4000 units | excluded, step is 25 percent of intended |
+| 20 pips | 1000 units | excluded, step is 100 percent of intended |
+| 50 pips | 400 units | excluded, below the minimum |
+| 80 pips | 250 units | excluded, below the minimum |
+
+**At 200 USD on Pepperstone's 1000 unit minimum, no forex strategy class is eligible
+at all.** Not merely macro. For the step to stay inside the 10 percent deviation
+limit the intended size must be at least 10,000 units, which needs a stop of 2 pips
+or tighter, which is inside the spread. Forex is not tradeable on this account under
+the current risk policy, at any stop distance.
+
+**How small the minimum has to be.** Same screen, same 200 USD, same limits:
+
+| Venue minimum and step | 5 pips | 20 pips | 50 pips | 80 pips |
+|---|---|---|---|---|
+| 1000 units, 0.01 lot | excluded | excluded | excluded | excluded |
+| 100 units, 0.001 lot | ok | ok | excluded, 25 percent | excluded, 40 percent |
+| 10 units, 0.0001 lot | ok | ok | ok | ok |
+| 1 unit | ok | ok | ok | ok |
+
+**A nano lot is not enough.** 0.001 lots, which is what the broker comparison sites
+mean by nano, unblocks scalping and intraday and leaves swing and macro excluded on
+quantisation. Macro width stops at this capital need a minimum at or below **10
+units**, which is 0.0001 lots. That is cent account territory rather than nano, and
+it is a different mechanism: a cent account redenominates the contract rather than
+lowering the lot.
+
+**What the search could and could not settle.** The 1000 unit minimum is not a
+cTrader platform limit. It is `minVolume` in Pepperstone's own symbol metadata, so a
+different cTrader broker can publish a smaller one and this adapter would need no
+change. Which brokers actually do is not answerable from comparison sites: they are
+marketing pages, they disagree with each other, and one of them contradicted itself
+on whether a broker offers cTrader at all. Candidates that appear repeatedly and
+accept Kenyan clients are IC Markets and RoboForex; IC Markets is the better
+regulated and is not advertised as offering below 0.01 lots, while RoboForex offers a
+0.001 lot cent style account and is regulated in Belize.
+
+**The only way to settle it is to read the number from the API**, which is exactly
+what `scripts/check_venue_assumptions.py` already does. The cheap next step is to
+open a demo account at a candidate, point the script at it, and read `minVolume`.
+That is an afternoon, needs no code, and produces a fact rather than a claim.
+
+**Two decisions this raises, both the director's.** Whether to open demo accounts at
+candidate brokers to measure them, and whether the 10 percent deviation limit is the
+right policy: it is a configured threshold rather than a law, and it is doing as much
+work here as the venue minimum. Relaxing it would change these answers, and SPEC 6
+says a limit is not raised to fit a venue, which is why it was not touched here.
+
 ### Not a decision yet: unchanged snapshot repeats become tick rows
 
 **Open. Waiting on the measured row counts, and then on the director.**
