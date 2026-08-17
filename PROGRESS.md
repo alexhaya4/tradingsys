@@ -375,7 +375,9 @@ to be brought with evidence rather than resolved quietly.
 | Instrument registry from venue metadata | Complete | Sync compares before writing and reports drift by field. cTrader source built |
 | Backfill caller | Complete | Queues missing open hours from the instrument's own schedule, then drains |
 | Resumable Dukascopy backfill | Not started | Reader and gap detector are done; the runner over `backfill_hours` is not |
-| 72 hour continuous ingestion run | Not started | Begins once the adapters and the registry are working, and is reported before it starts |
+| Supervised ingest process | Complete | Supervisor reports on progress, not liveness. Registry sync, crypto quotes, periodic backfill |
+| cTrader live quote subscription | Not started | Blocks the 72 hour run: no live forex quotes without it |
+| 72 hour continuous ingestion run | Blocked | Needs cTrader spot subscription. SPEC 8 says both venues, and only crypto is live |
 
 ### Outstanding work, in the order it should be done
 
@@ -880,6 +882,44 @@ disagree with each other, and one contradicted itself on whether a broker offers
 cTrader at all. The number that decides it is `minVolume` from the venue's own API,
 which `scripts/check_venue_assumptions.py` already reads. Open the demo, point the
 script at it, read the number.
+
+### The supervised ingest process
+
+**Complete 2026-08-17.** `src/tradingsys/app/supervisor.py` and
+`src/tradingsys/app/ingest.py`.
+
+**The supervisor reports on progress, not on liveness**, which is the defect class from
+`docs/DECISIONS.md` made executable. Every activity declares how long it may go without
+making progress; the work itself reports progress, because only the work knows what
+progress means; and an activity past its deadline is unhealthy **even though its task is
+alive and its failure count is zero**. `ProgressCheck` puts that on readiness rather than
+liveness, since a stalled venue is not a reason to restart a healthy process.
+
+The two behaviours worth stating:
+
+**A clean return is not completion.** A stream that ends has stopped ingesting, so
+returning restarts the activity exactly as raising does. Treating a return as success is
+how ingestion stops silently on a process that stays up.
+
+**Backoff resets on progress.** An activity that worked before failing starts its next
+backoff from the base delay, so one bad hour does not leave the retry interval pinned at
+its ceiling for the rest of a 72 hour run.
+
+Both were verified by mutation. Reporting liveness instead of progress breaks three
+tests; treating a clean return as completion breaks one. Time is driven by an injected
+clock, so a nine hour stall is asserted in microseconds and the test measures the
+behaviour rather than the machine's timer.
+
+**What it runs:** registry sync on an interval, so a broker changing a minimum lot
+mid-run is noticed during the run rather than at the next restart; the crypto quote
+stream into the tick recorder; and the periodic Dukascopy backfill over the hours the gap
+detector finds missing.
+
+**What blocks the 72 hour run, stated rather than hidden.** There is no live forex quote
+stream. cTrader spot subscription is a protocol path this client does not speak yet, so
+the forex leg contributes history through the backfill and nothing live. `SPEC.md`
+section 8 requires continuous ingestion for both venues, so the run cannot be claimed
+until that exists. That is the next build.
 
 ### Not a decision yet: unchanged snapshot repeats become tick rows
 
