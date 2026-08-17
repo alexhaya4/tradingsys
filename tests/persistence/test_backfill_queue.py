@@ -73,9 +73,7 @@ class TestEnqueue:
         with pytest.raises(PersistenceError, match="not aligned"):
             await queue.enqueue(SOURCE, row_id, [HOUR + timedelta(minutes=30)])
 
-    async def test_a_naive_hour_is_refused(
-        self, queue: BackfillRepository, row_id: int
-    ) -> None:
+    async def test_a_naive_hour_is_refused(self, queue: BackfillRepository, row_id: int) -> None:
         with pytest.raises(PersistenceError, match="naive"):
             await queue.enqueue(SOURCE, row_id, [datetime(2026, 8, 10, 13)])  # noqa: DTZ001
 

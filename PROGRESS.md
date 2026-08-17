@@ -868,46 +868,56 @@ phase 2 is done and accepted.
 | Unchanged snapshot repeats stored as rows | Described in its own section above. Decide with the measured row counts in hand, not before |
 | `/health` asserts no internal invariant | Intended, but the director asked whether it should stay that way. Still open; see the section on it above |
 
-### The weekday crypto capture is scheduled, aligned to the hour
+### The weekday crypto capture, armed for the third time
 
-`scripts/measure_crypto_rate.py` counts top of book updates and trades per UTC
-hour rather than reporting a single mean, because a busy hour extrapolated to a
-day overstates storage and a quiet one understates it, and both look like a
-measurement.
+`scripts/measure_crypto_rate.py` counts top of book updates and trades per UTC hour
+rather than reporting a single mean, because a busy hour extrapolated to a day
+overstates storage and a quiet one understates it, and both look like a measurement.
 
-**Relaunched aligned on 2026-08-16T17:40Z.** The first arming was started by
-elapsed sleep rather than against the clock, so it would have begun at
-00:30:17Z and produced two half-length buckets at the ends of the series. The
-script buckets by absolute `%Y-%m-%dT%H`, so that would have left Monday hour 00
-reading at roughly half its true rate with a second half-hour of it filed under
-Tuesday. This measurement sizes retention, which is decided once, and a dataset
-with two half-length buckets at its ends is a trap for whoever reads it later.
+**Armed 2026-08-17T06:46Z by `scripts/arm_crypto_capture.sh`.**
 
 | Property | Value |
 |---|---|
-| PID | 34322, own session, detached, cwd is the repository |
-| Starts | 2026-08-16T23:59:30Z, thirty seconds early so the socket is streaming before the hour turns |
+| PID | 42146, own session, detached, cwd is the repository |
+| Starts | 2026-08-17T07:00:00Z, Monday |
 | Runs for | 24.01 hours |
-| Ends | 2026-08-18T00:00:06Z |
+| Ends | 2026-08-18T07:00:36Z, Tuesday |
 | Writes | `/var/tmp/tradingsys/crypto-rate-weekday.json`, log beside it |
 
-**Monday 2026-08-17 hours 00 through 23 are therefore all complete.** The series
-also carries two slivers that are to be discarded rather than averaged in: about
-30 seconds filed under Sunday hour 23, and about 6 seconds under Tuesday hour 00.
-They are obvious at a glance because they are seconds rather than half hours,
-which is the point of aligning it this way.
+**All 24 hours of the day are covered exactly once and every one of them is a
+complete bucket.** The window spans two dates rather than one: Monday hours 07
+through 23, then Tuesday hours 00 through 06. Both are weekdays, which is what the
+measurement is for, and every hour of the day is sampled once. It is not the
+midnight to midnight window originally intended, for the reason below.
 
-That process does not survive a host restart, since WSL2 stops with it. If the
-JSON file is absent after Tuesday, the capture did not run. Relaunching then
-means picking the next Monday rather than starting immediately, because the whole
-purpose is a weekday profile:
+**Why it is armed a third time, and what went wrong twice.** Worth recording,
+because both failures produced a capture that looked armed and would have produced
+a subtly wrong dataset.
+
+The first arming counted a fixed number of seconds from launch, so it would have
+started at 00:30 and put two half length buckets at the ends of a series that
+buckets by absolute UTC hour.
+
+The second computed the sleep against a wall clock target, which is correct until
+the host suspends. WSL2 froze the VM overnight: the process kept its place in the
+`sleep` while the wall clock advanced about nine hours. A capture armed for
+2026-08-16T23:59:30Z was still sleeping at 06:45Z the next morning, with 7870
+seconds left, and would have started at 08:57Z. By then Monday hours 00 through 06
+had already passed, which is why the window moved to 07:00 rather than waiting for
+next Monday: a full week of delay buys a midnight boundary and nothing else, and
+crypto retention is blocked until this reports.
+
+`scripts/arm_crypto_capture.sh` now does the waiting, and it re-reads the clock
+every thirty seconds rather than trusting an interval, so a suspend costs one poll
+of lateness instead of its whole duration. The tracker's previous advice to relaunch
+with a `sleep` computed from the clock was the thing that failed, so it has been
+replaced by the script rather than corrected in prose.
+
+**If the JSON file is absent after Tuesday**, the capture did not run. Rearm with a
+future UTC instant, choosing a weekday:
 
 ```bash
-sleep_for=$(( $(date -u -d '<next Monday> 00:00:00' +%s) - $(date -u +%s) - 30 ))
-setsid nohup bash -c "sleep ${sleep_for}; exec uv run python \
-  scripts/measure_crypto_rate.py --hours 24.01 \
-  --out /var/tmp/tradingsys/crypto-rate-weekday.json" \
-  > /var/tmp/tradingsys/crypto-rate-weekday.log 2>&1 &
+setsid nohup scripts/arm_crypto_capture.sh '2026-08-24 00:00:00' >/dev/null 2>&1 &
 ```
 
 **None of the crypto rate samples taken so far may be used to size retention.**
