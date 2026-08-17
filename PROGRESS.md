@@ -788,6 +788,45 @@ Dukascopy, a different feed, widens at NFP where this one does not. That answers
 zero widening is plausible at all without letting a research-only number into an
 execution cost model.
 
+### The Dukascopy cross-check: the demo feed is not the problem
+
+**Run 2026-08-17.** `scripts/crosscheck_release_spread.py`. Dukascopy is research only,
+so nothing here is a cost estimate for Pepperstone; the question was narrower, and was
+whether any real feed widens at a release.
+
+EUR/USD, 2026-08-07, spreads in pips:
+
+| Window | ticks | median | mean | p95 | max |
+|---|---|---|---|---|---|
+| quiet hour 11:00 | 1508 | 0.300 | 0.273 | 0.500 | 0.600 |
+| 13:30 minus 1 min | 76 | 0.200 | 0.228 | 0.400 | 0.400 |
+| **release minute 13:30** | 113 | **0.200** | 0.265 | 0.500 | 0.500 |
+| 13:30 plus 1 min | 94 | 0.300 | 0.277 | 0.500 | 0.500 |
+| 13:30 plus 15 min | 85 | 0.200 | 0.233 | 0.400 | 0.500 |
+
+**No widening at all**, on a second and independent feed. Every release window sits at
+0.7 to 1.0 times the quiet median, and the widest single tick in the release minute is
+narrower than the widest in the quiet hour. Tick rate rises about fourfold, from roughly
+25 per minute to 113: activity spikes and quoted spread does not.
+
+**So my hypothesis was wrong and is withdrawn.** The demo feed is not shown to be
+unrepresentative on spread. The magnitude the director asked for turns out to be a
+factor of about 1.0, and that is the finding.
+
+**What survives is a better argument.** Quote data cannot measure execution cost at all.
+What degrades at a release is the size executable at the quoted price, so the cost shows
+up in slippage and rejection rather than in the quote. A book can hold a 0.2 pip spread
+while the volume behind it collapses, and no amount of quote data from any feed reveals
+that. The optimistic bias at the phase 8 gate is therefore real, but its mechanism is
+the unmeasured slippage term rather than an understated spread. `SPEC.md`'s phase 8 entry
+was written on the withdrawn reason and has been corrected to the surviving one.
+
+**Two incidental confirmations.** The Dukascopy fetcher refused an HTTP 429 rather than
+recording it as an empty hour, which is exactly the distinction it was built to make: a
+rate limit answered as "no data for this hour" would have written a false hole into the
+backfill queue. And Dukascopy's records carry bid and ask together, so this measurement
+needed none of the pairing reconstruction the cTrader side required.
+
 ### Slippage, and what it would take to measure
 
 Not in the cost figures, and stated rather than omitted. It exists only in fills, and

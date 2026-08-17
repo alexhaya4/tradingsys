@@ -702,6 +702,59 @@ If the criteria are not met, the outcome is redesign or termination. Extending
 the paper period to search for a favorable window is not permitted, because
 that is data mining the go decision itself.
 
+**Paper results carry a known optimistic bias, and the gate must price it in.**
+Recorded 2026-08-17, before the paper period rather than after it. The conclusion below
+survived a cross-check that refuted its first stated reason, so the reason given is the
+one that held.
+
+Spread was measured on the Pepperstone demo and the median does not widen through a
+non-farm payrolls release: 0.000 pips on EUR/USD before, during and after the 2026-08-07
+13:30 UTC release. That looked like a demo feed failing to model widening. Cross-checked
+against Dukascopy, an independent feed whose records carry bid and ask together so no
+alignment reconstruction is involved, the same absence appears: a quiet-hour median of
+0.300 pips against 0.200 in the release minute, with the widest tick in that minute at
+0.500 against a quiet maximum of 0.600. Tick rate rises about fourfold; quoted spread
+does not move. **So the demo feed is not shown to be unrepresentative on spread**, and
+that inference is withdrawn.
+
+The bias is nonetheless real, for a reason that does not depend on it:
+
+- **Quote data cannot measure execution cost.** Both measurements are of quoted spread,
+  and neither is a record of what an order would have filled at. What degrades at a
+  release is primarily the size executable at the quoted price, and therefore slippage
+  and rejection, not the quote itself. A book can hold a 0.2 pip spread while the volume
+  behind it collapses, and no amount of quote data reveals that.
+
+- **Slippage is excluded from every cost figure and is unmeasured.** It exists only in
+  fills, so it is phase 6 or phase 7 data by construction. At a 20 pip stop one pip of
+  slippage is 5 percent of risk, comparable to the entire commission cost, so the
+  unmeasured term is the same order of magnitude as the measured ones.
+
+- **Paper execution is simulated, so it cannot generate the missing term.** The paper
+  period fills against recorded prices rather than against a book, which means it will
+  reproduce measured costs faithfully and the unmeasured one not at all.
+
+Three consequences bind this gate:
+
+- **Paper results are optimistic by an unquantified amount.** Measured costs are a lower
+  bound on live costs rather than an estimate of them.
+
+- **The bias is one-directional, which makes the two outcomes asymmetric.** A paper
+  period that **fails** is a real failure: it failed with costs understated, and live
+  costs can only be worse. A paper period that **passes** is weaker evidence than it
+  appears, because the pass was achieved without the missing term.
+
+- **The gate therefore requires a margin above break-even, not break-even.** Net-of-cost
+  profitability is necessary and not sufficient. The margin must be set before the paper
+  period begins, must exceed the plausible cost understatement, and must be stated as a
+  figure rather than as a judgement made while looking at the result. A result inside the
+  margin is not a pass; it is a result that cannot distinguish edge from an unmeasured
+  cost.
+
+The margin cannot be derived from quote data, by construction. Narrowing it needs real
+fills, which arrive in phase 6 at the earliest, so until then the margin is a judgement
+the director makes explicitly and records here.
+
 **What a fail means when only the trend leg exists.** The reorder in section 5.1
 makes it possible to arrive here with trend built and macro not. If so, the gate
 is deciding on the leg with the weaker theoretical basis: trend is an empirical

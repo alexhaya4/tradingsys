@@ -705,12 +705,31 @@ must not rest its cost model on them. The direction of the error is known, which
 worth something: real spreads can only be wider, so scalping is at least as dead as
 measured, and the 3 percent at a 20 pip stop can only rise.
 
-**How to settle it without a live account.** Dukascopy tick data carries bid and ask
-from a different venue, and `core/provenance.py` marks it research only, so it cannot
-supply a cost estimate for Pepperstone. It can answer a narrower question that is not
-about cost at all: whether any real feed shows widening at NFP. If Dukascopy widens
-sharply where the demo does not, the demo feed is confirmed unrepresentative without
-any research-only number leaking into an execution model.
+**How it was settled, and the answer was not the expected one.** Dukascopy tick data
+carries bid and ask in the same record, so it involves no alignment reconstruction, and
+`core/provenance.py` marks it research only so nothing from it may enter an execution
+cost model. It was used only to ask whether any real feed widens at NFP.
+
+**It does not.** EUR/USD on 2026-08-07: quiet hour median 0.300 pips, release minute
+median 0.200, widest tick in the release minute 0.500 against a quiet maximum of 0.600.
+Tick rate rises about fourfold across the release and quoted spread does not move.
+
+So the hypothesis that the demo feed fails to model widening is **not confirmed, and is
+withdrawn**. Two independent feeds show the same absence. Either EUR/USD genuinely does
+not widen much in median terms at NFP, which is plausible for the most liquid pair in
+the world against a book that recovers in milliseconds, or both sources are aggregated
+in ways that smooth it. Neither can be distinguished from quote data.
+
+**What survives, and it is the more durable argument.** Quote data cannot measure
+execution cost at all. What degrades at a release is the size executable at the quoted
+price, and therefore slippage and rejection, not the quote. A book can hold a 0.2 pip
+spread while the volume behind it collapses, and no quantity of quote data from any
+feed reveals that. The cost understatement is therefore real but its mechanism is the
+unmeasured slippage term rather than an understated spread.
+
+The `SPEC.md` phase 8 entry was corrected to say this. It had been written on the
+withdrawn reason before the cross-check ran, which is the argument for running it.
+
 
 ---
 
