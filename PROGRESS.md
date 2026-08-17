@@ -714,6 +714,73 @@ excluded one percent below it.
 The relationship is `balance = step x stop_in_pips x 0.2` for a USD quoted pair, so
 the three levers are a smaller step, a tighter stop, or more capital.
 
+### Round-trip cost, measured on the Pepperstone demo
+
+**Measured 2026-08-17 for Friday 2026-08-14**, from the venue's own historical tick
+data and its own published commission. No advertised figure is used. Dukascopy was not
+substituted: it is a different venue and `core/provenance.py` marks it research only,
+so its spreads answer a question about a book these orders would not cross.
+
+**Spread is almost nothing on this account, because it is a raw spread account.**
+EUR/USD median 0.000 pips across every session; GBP/USD and USD/JPY median 0.100. The
+widest session is the late New York hour, at 0.200 to 0.300. Maxima reach 0.6 to 0.9
+pips at session opens. The cost is not in the spread.
+
+**Commission is the cost, and it is 3.00 USD per standard lot per side**, read from
+`preciseTradingCommissionRate` in the symbol metadata rather than a rate card. That is
+0.06 USD round trip on the 1000 unit minimum.
+
+**Cost as a fraction of risk taken, which is the number that decides viability:**
+
+| Stop | EUR/USD median | EUR/USD p95 | GBP/USD median | USD/JPY median |
+|---|---|---|---|---|
+| 5 pips | **12.0 percent** | 16.0 percent | 14.0 percent | **21.1 percent** |
+| 10 pips | 6.0 percent | 8.0 percent | 7.0 percent | 10.5 percent |
+| 20 pips | 3.0 percent | 4.0 percent | 3.5 percent | 5.3 percent |
+
+**The ratio is independent of position size and capital.** Spread cost, commission and
+risk all scale linearly with units, so the ratio cancels exactly: 12 percent at a 5
+pip stop whether the position is 10 units or 100,000. Verified across four orders of
+magnitude. This matters because it means the cost question is answered once, for every
+account size, and only the sizing question depends on capital.
+
+**Scalping at a 5 pip stop is not viable on this venue.** Twelve percent of the risk
+budget consumed per round trip on the cheapest pair, sixteen at the 95th percentile,
+twenty one on USD/JPY. A strategy would need a gross edge above 0.12R to 0.25R per
+trade merely to break even. For scale, `SPEC.md` section 5.5 treats funding at 3
+percent of 1R over seven days as approaching material; this is that cost four times
+over, instantly, on every trade.
+
+**Slippage is not in these figures** and would make them worse. Measuring it needs
+fill data, which does not exist until execution and paper trading. At a 5 pip stop one
+pip of slippage would add twenty percentage points, which is why the conclusion there
+is robust; at 20 pips it would add five, which is tolerable but not free.
+
+### What the cost measurement changes about the broker question
+
+**It does not close it. It sharpens it, and moves the target.**
+
+The two constraints are orthogonal, which was not obvious before measuring. Cost
+depends only on stop distance. Sizing eligibility depends only on capital and the
+venue's step. So they resolve independently:
+
+- **Cost rules out stops tighter than about 20 pips.** 5 pips costs 12 to 21 percent
+  of risk and 20 pips costs 3.0 to 5.3, which is in the range this project already
+  accepts for funding.
+- **Sizing then asks what capital a 20 pip stop needs**, which is
+  `step x 20 x 0.2`: 4,000 USD on a 1000 unit step, 400 USD on a 100 unit step, and
+  **40 USD on a 10 unit cent account step**.
+
+**So the class to aim at is 20 pip intraday, not 5 pip scalping, and the required step
+is 50 units or smaller rather than 200.** That is still cent account territory, and it
+still points at RoboForex ProCent first, but for a different reason and against a
+different number than before the measurement.
+
+At 200 USD on a 10 unit step, a 20 pip stop buys 1000 units with 1 percent
+quantisation error against the derived 5 percent tolerance, and costs 3 percent of
+risk. That combination works. Nothing on a 1000 unit step works at this capital at any
+stop distance.
+
 ### Which brokers are worth testing, and what each would need to publish
 
 At 200 USD, the step a broker must publish to clear each class:

@@ -538,6 +538,26 @@ that list, for the reason section 6 gives.
 The crypto leg is unaffected: ETH/USDT perpetual clears at this capital because its
 step is a far smaller fraction of the position the budget buys.
 
+**Eligibility by sizing is necessary and not sufficient.** The tables above answer one
+question: whether the venue's quantity grid permits a position that risks what the
+limit says. They say nothing about whether the trade is worth taking. A class is
+**viable** only once round-trip cost, meaning spread plus commission plus expected
+slippage, has been measured against that class's stop distance **on the venue it will
+actually trade**, and found to be a small enough fraction of the risk taken to leave
+an edge that could exist.
+
+The two are easiest to confuse exactly where it is most expensive. The tightest stop
+is always the most eligible by sizing, because it buys the largest position per unit
+of risk, and it is simultaneously the most exposed to cost, because the same fixed
+spread is a larger fraction of a smaller stop. A screen that reports only sizing will
+therefore recommend most strongly the class that costs will destroy first.
+
+This distinction produced a wrong answer on 2026-08-16, when a stop ceiling was
+reported as though it settled viability, and it is written here rather than
+remembered. Cost measurement uses recorded quotes from the execution venue. Data from
+a research-only source does not substitute for it: see the provenance rules, which
+already refuse that substitution at the type level.
+
 
 ---
 
