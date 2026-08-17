@@ -371,7 +371,7 @@ to be brought with evidence rather than resolved quietly.
 | cTrader adapter: symbol metadata | Complete | Digits, pip position, volumes, swap rates and charging convention, trading mode, schedule. Verified against the live catalogue |
 | Sizing deliverable, forex half | Complete | Reported below. All four pairs excluded at a 1 percent stop |
 | Capital independence, SPEC 6.1 | Complete | Dynamic screen, property tests over eight orders of magnitude, structural guard against absolute amounts |
-| Resumable Dukascopy backfill | In progress | Reader and gap detector done; the runner over `backfill_hours` is next |
+| Resumable Dukascopy backfill | Complete | Queue, runner, HTTP fetcher. Concurrency 3, retries with backoff, failed hours retried not skipped |
 | Instrument registry from venue metadata | Not started | Blocked on the cTrader adapter for the forex half |
 | Resumable Dukascopy backfill | Not started | Reader and gap detector are done; the runner over `backfill_hours` is not |
 | 72 hour continuous ingestion run | Not started | Begins once the adapters and the registry are working, and is reported before it starts |
@@ -391,10 +391,7 @@ to be brought with evidence rather than resolved quietly.
    the adapter above. Where 1 percent does not reach a viable size, the
    instrument is excluded and the exclusion is reported; the machinery for that
    decision exists in `src/tradingsys/risk/eligibility.py`.
-4. **Resumable Dukascopy backfill** over the `backfill_hours` table from
-   migration 0002. Concurrency capped at 3, retries with backoff. An hour that
-   fails after its retries is recorded as failed and retried later, never
-   skipped and never silently treated as complete.
+4. ~~**Resumable Dukascopy backfill.**~~ Done 2026-08-17. See the section below.
 5. **Weekday crypto rate**, then set crypto retention. The capture is scheduled;
    see the section on it below.
 6. **72 hour continuous ingestion run.** Report to the director when the
@@ -635,6 +632,49 @@ in `docs/DECISIONS.md` under rejected options, recorded so it is not revisited.
 **The broker minimum lot investigation matters more now, not less.** It is the
 cheapest route to unblocking macro: a smaller minimum widens the stop ceiling at
 unchanged capital. Still open, and it is reported when it is done.
+
+### The resumable Dukascopy backfill
+
+**Status as of 2026-08-17: complete.** Queue in `src/tradingsys/persistence/backfill.py`,
+runner and HTTP fetcher in `src/tradingsys/marketdata/backfill.py`.
+
+**An hour ends in exactly one of three states, and none of them is silence.** Complete
+with a row count, which may legitimately be zero for an hour the feed holds nothing
+for. Failed with the reason, claimable again by a later run. Or the process died
+holding it, in which case the claim goes stale and another run reclaims it. There is
+no path that leaves an hour neither done nor retryable, and none that marks an hour
+complete without having written what it found.
+
+**Zero rows is an answer, not a failure.** Every weekend hour is one. Recording it as
+complete is what lets the queue drain; recording it as failed would mean a backfill
+that never converges. The table constrains a complete row to carry a row count, so
+zero has to be stated rather than left null.
+
+**Concurrency is 3, and claiming is atomic.** `FOR UPDATE SKIP LOCKED` means two
+workers cannot take the same hour, proven by an integration test that fires two claims
+concurrently and asserts no hour appears twice. Without it the three workers would
+spend the feed's tolerance fetching the same hours.
+
+**A corrupt payload is not retried.** The reader refuses an HTML error page rather than
+decoding it as an empty hour, and refuses a truncated archive. Neither becomes valid by
+asking again in a second, and retrying would turn a clear signal about the feed into a
+slow one. Transport failures are retried with exponential backoff and full jitter, the
+jitter being what stops three workers retrying in lockstep after a shared failure.
+
+**404 and 200 are the only answers the fetcher accepts.** 404 is an hour the feed holds
+nothing for. Anything else raises and is retried, because the one thing the fetcher must
+never do is return empty bytes for a request that did not succeed: that records a hole
+in history that never existed.
+
+Coverage: 22 unit tests against a scripted feed and queue for the runner's handling of
+the state machine, and 17 integration tests against real PostgreSQL for the state
+machine itself, including the atomic claim, the stale claim recovery, and the
+constraints that refuse a complete row with no row count or a failed row with no reason.
+
+**Not yet done:** nothing schedules a backfill run. The runner is a component with no
+caller, and wiring it to a process with a configured range is a separate unit. The
+`backfill_hours` queue is populated by `enqueue`, and `hours_between` builds a range,
+but no scheduled job calls either yet.
 
 ### Not a decision yet: unchanged snapshot repeats become tick rows
 
