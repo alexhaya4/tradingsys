@@ -880,6 +880,69 @@ quantisation error against the derived 5 percent tolerance, and costs 3 percent 
 risk. That combination works. Nothing on a 1000 unit step works at this capital at any
 stop distance.
 
+### The cTrader broker search, done from the platform rather than from rankings
+
+**2026-08-18. RoboForex is out**: its account opening form offers MetaTrader 4,
+MetaTrader 5 and R StocksTrader, and no cTrader on any account type. The comparison
+sites listing it as a cTrader broker were wrong. The rule that follows is in
+`docs/DECISIONS.md`: platform availability comes from the account opening form, never
+from a site that ranks brokers, and never from broker marketing either, because those
+list platforms per broker while availability is per account type.
+
+**One of the three filters turns out to be vacuous.** Spotware's own help centre states
+that the Open API "is supported by all trading accounts of any cTrader-affiliated
+brokers" by default. So requiring Open API access narrows nothing: every cTrader broker
+has it.
+
+**The decisive filter cannot be applied from any list.** `minVolume` is per-symbol broker
+configuration published only over the API, so no directory, however authoritative, can
+be filtered on it. That is the same wall as before and no amount of better sourcing moves
+it.
+
+**So the question was answered from data instead.** Every symbol on the Pepperstone
+catalogue was fetched, all 1939, and the minimum volumes examined:
+
+| Minimum, in units | Symbols |
+|---|---|
+| 0.01 | 13 |
+| 0.1 | 964 |
+| 1 | 780 |
+| 10 to 100 | 50 |
+| 1000 | 115 |
+| above 1000 | 17 |
+
+**The platform permits small minimums and this broker uses them**, just not on currency
+pairs. The 0.01 and 0.1 minimums are indices, metals and crypto CFDs, where a unit is a
+contract rather than a unit of base currency, so they are not comparable to FX sizing.
+Filtering to instruments whose base and quote are both currencies gives 90 pairs, and
+**every one of them is minVolume 1000, step 1000. Uniformly, without exception.**
+
+That is the useful finding. The 1000 unit floor is not a cTrader platform limit, since
+the same broker configures 0.01 on other instruments, and it is not a per-symbol quirk
+either. It is a uniform FX policy, and 0.01 lots is the universal retail FX convention
+across every platform.
+
+**Where sub-0.01 lot FX actually comes from is cent accounts, and those are an MT4 and
+MT5 construct.** That is consistent with everything observed: RoboForex, the best known
+cent account broker, runs its cent accounts on MT4 and MT5 and offers no cTrader at all.
+
+**The conclusion, stated plainly rather than tested candidate by candidate.** There is
+no evidence that any cTrader broker configures FX below 1000 units, and a structural
+reason to expect none does. Forex at 200 USD therefore needs **either more capital or a
+second venue adapter**. Continuing to open demo accounts would be testing candidates to
+confirm a conclusion the data already supports.
+
+### The three ways forward on forex, none of them taken here
+
+| Option | What it costs | What it buys |
+|---|---|---|
+| **More capital** | 4,000 USD for 20 pip intraday on a 1000 unit step, 20 times the current account | Forex on the venue already built, with no new code |
+| **A second venue adapter** | FXOpen Micro has the arithmetic at a 10 unit effective step and needs 40 USD, but speaks MT4, MT5 and TickTrader rather than cTrader. A whole adapter, plus its share of phase 6 execution work | Forex at current capital |
+| **Crypto only for now** | Nothing. ETH/USDT perpetual already clears at 200 USD | Defers the decision until capital or evidence changes, and the system is capital independent by design so forex enters on its own when the balance supports it |
+
+The second is real work and is the director's decision to take deliberately rather than
+to drift into. It is noted here so that it is taken rather than assumed.
+
 ### Which brokers are worth testing, and what each would need to publish
 
 At 200 USD, the step a broker must publish to clear each class:

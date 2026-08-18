@@ -731,6 +731,70 @@ The `SPEC.md` phase 8 entry was corrected to say this. It had been written on th
 withdrawn reason before the cross-check ran, which is the argument for running it.
 
 
+### Broker platform availability comes from the account opening form, nothing else
+
+Established 2026-08-18, at the cost of a candidate.
+
+RoboForex was shortlisted as the only plausible combination of a cent account with
+cTrader, on the strength of several broker comparison sites listing it as a cTrader
+broker. The account opening form offers MetaTrader 4, MetaTrader 5, and R StocksTrader.
+There is no cTrader, on any account type. The sites were simply wrong.
+
+**The rule.** Platform availability is established only from the broker's own account
+opening form, where the platform is actually selected. Not from comparison sites, not
+from the broker's own marketing pages either, because those list platforms per broker
+while availability is per account type, and the cent account is exactly the type most
+likely to be excluded.
+
+The same caution applies to every other claim in that class: minimum lot, commission,
+jurisdiction acceptance. The API answers the first two once an account exists, and the
+signup form answers the third. Nothing is taken from a page that is trying to rank
+brokers.
+
+**It cost a candidate and would have cost more.** The shortlist had already been
+narrowed on this basis and the next step was to open the account. Had the claim been
+believed one step further, the cost would have been a second adapter written against a
+platform the broker does not offer.
+
+### The NFP sequence: a conclusion written before its evidence, then corrected by it
+
+Recorded at the director's instruction on 2026-08-18. The value is in the order the
+steps happened, not in the answer.
+
+**What happened, in sequence.** The Pepperstone demo showed no spread widening at a
+non-farm payrolls release. The inference drawn was that a demo feed which does not widen
+at the most violent scheduled event of the month does not widen anywhere, and is
+therefore unrepresentative of live pricing. The `SPEC.md` phase 8 gate entry was written
+on that reason, stating that paper results carry an optimistic bias because spread is
+understated.
+
+Then the cross-check ran. Dukascopy, an independent feed whose records carry bid and ask
+together so no reconstruction is involved, shows the same absence: a quiet-hour median
+of 0.300 pips against 0.200 in the release minute, with the widest tick in that minute
+narrower than the widest in the quiet hour, while tick rate rises about fourfold.
+
+**The premise was refuted and the entry was rewritten rather than kept.** The demo feed
+is not shown to be unrepresentative on spread, and that inference is withdrawn.
+
+**The surviving argument is stronger than the one it replaced.** Quote data cannot
+measure execution cost at all, because what degrades at a release is the size executable
+at the quoted price rather than the quote itself. A book can hold a 0.2 pip spread while
+the volume behind it collapses, and no quantity of quote data from any feed reveals that.
+So the optimistic bias at the phase 8 gate is real, but its mechanism is the unmeasured
+slippage term rather than an understated spread, and that holds regardless of which feed
+is used or how well it models widening.
+
+**Why the sequence is worth recording.** The stronger argument was not reachable by
+reasoning from the first result. It became visible only when the obvious explanation was
+tested and failed, which forced the question of what quote data can establish at all. A
+conclusion that had been left resting on its original premise would have been correct by
+accident, for a reason that is false, and would have been defended on that reason the
+next time it was challenged.
+
+The general form: when a conclusion is written before the evidence that would test it,
+the test is worth running even when the conclusion is expected to survive, because what
+it changes may be the reasoning rather than the answer.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited
