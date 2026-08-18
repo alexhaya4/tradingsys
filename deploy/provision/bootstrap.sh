@@ -6,10 +6,20 @@
 #
 #     sudo -u tradingsys deploy/provision/bootstrap.sh --volume-name tradingsys-data
 #
-# What it does, in order: verifies the block storage volume exists, formats it only if
-# it has never been formatted, mounts it permanently, creates the data directories,
-# checks that .env is present and has no placeholder values left in it, installs the
-# systemd unit, and starts the stack.
+# What it does, in order: adopts the mount the platform already created, creates the
+# data directories, checks that .env is present and has no placeholder values left in
+# it, installs the systemd unit, and starts the stack.
+#
+# It does not format and it does not mount. DigitalOcean's automatic format and mount
+# creates a systemd .mount unit for the volume, and that unit is the single owner of the
+# mount. A second definition in /etc/fstab for the same device is not redundant, it is
+# ambiguous: the director nearly lost the mount that way, with a typo in the device name
+# whose only symptom was df quietly reporting the root disk. So this script verifies and
+# adopts, and refuses to proceed when the volume is not mounted rather than mounting it
+# a second way.
+#
+# Removing mkfs from this script also removes the only line in it that could destroy
+# recorded history.
 #
 # WHAT BREAKS IF THIS CHANGES: the systemd unit and docker-compose.prod.yml both expect
 # TRADINGSYS_DATA_ROOT to be the mount point and expect ${TRADINGSYS_DATA_ROOT}/postgres
@@ -19,20 +29,17 @@
 set -euo pipefail
 
 SERVICE_USER="${SERVICE_USER:-tradingsys}"
-DATA_ROOT="${TRADINGSYS_DATA_ROOT:-/mnt/tradingsys_data}"
-VOLUME_NAME=""
+DATA_ROOT="${TRADINGSYS_DATA_ROOT:-/mnt/tradingsys_db}"
 SKIP_START=0
 
 usage() {
     cat <<'USAGE'
-Usage: bootstrap.sh --volume-name NAME [options]
-
-Required:
-  --volume-name NAME    DigitalOcean block storage volume name, exactly as created.
-                        The device appears at /dev/disk/by-id/scsi-0DO_Volume_NAME.
+Usage: bootstrap.sh [options]
 
 Options:
-  --data-root PATH      Mount point for the volume. Default: /mnt/tradingsys_data
+  --data-root PATH      Where the platform mounted the volume. DigitalOcean's automatic
+                        format and mount uses /mnt/<volume-name>.
+                        Default: /mnt/tradingsys_db
   --service-user NAME   Unix user that owns the repository and runs the stack.
                         Default: tradingsys
   --skip-start          Converge the host but do not start the stack.
@@ -42,7 +49,6 @@ USAGE
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --volume-name)  VOLUME_NAME="${2:?--volume-name needs a value}"; shift 2 ;;
         --data-root)    DATA_ROOT="${2:?--data-root needs a value}"; shift 2 ;;
         --service-user) SERVICE_USER="${2:?--service-user needs a value}"; shift 2 ;;
         --skip-start)   SKIP_START=1; shift ;;
@@ -51,61 +57,47 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$VOLUME_NAME" ]]; then
-    echo "error: --volume-name is required. It is the name of the DigitalOcean block" >&2
-    echo "storage volume, and there is no default because guessing it would mount the" >&2
-    echo "wrong disk or none at all." >&2
-    exit 2
-fi
-
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DEVICE="/dev/disk/by-id/scsi-0DO_Volume_${VOLUME_NAME}"
 
 step() { printf '\n== %s\n' "$1"; }
 
 # ---------------------------------------------------------------------------
-step "checking the block storage volume"
+step "adopting the volume the platform mounted"
 # ---------------------------------------------------------------------------
-if [[ ! -e "$DEVICE" ]]; then
-    echo "error: no block device at $DEVICE" >&2
-    echo "The volume must be created and attached to this droplet before bootstrap" >&2
-    echo "runs. Available DigitalOcean volumes on this host:" >&2
+if ! mountpoint -q "$DATA_ROOT"; then
+    echo "error: ${DATA_ROOT} is not a mount point." >&2
+    echo >&2
+    echo "This script adopts the mount rather than creating one, because the platform's" >&2
+    echo "automatic format and mount already owns it through a systemd .mount unit and a" >&2
+    echo "second definition for the same device is ambiguous rather than redundant." >&2
+    echo >&2
+    echo "Mounts currently under /mnt:" >&2
+    findmnt --noheadings --output TARGET,SOURCE,FSTYPE --submounts /mnt 2>/dev/null >&2 || echo "  (none)" >&2
+    echo >&2
+    echo "Attached DigitalOcean volumes on this host:" >&2
     ls -1 /dev/disk/by-id/ 2>/dev/null | grep '^scsi-0DO_Volume_' >&2 || echo "  (none)" >&2
+    echo >&2
+    echo "Pass --data-root with the path the platform used, which is /mnt/<volume-name>," >&2
+    echo "or attach the volume with the automatic format and mount option." >&2
     exit 1
 fi
-echo "found $DEVICE"
 
-# ---------------------------------------------------------------------------
-step "formatting the volume, only if it has never been formatted"
-# ---------------------------------------------------------------------------
-# blkid prints the filesystem type and exits non-zero when there is none. An unformatted
-# volume is formatted once; a formatted one is never touched again, because reformatting
-# a volume that already holds the database would destroy every recorded tick and there
-# is no confirmation prompt in an unattended script that could save us from it.
-if FS_TYPE="$(sudo blkid -o value -s TYPE "$DEVICE" 2>/dev/null)"; then
-    echo "already formatted as ${FS_TYPE}, leaving it alone"
-else
-    echo "unformatted, creating ext4"
-    sudo mkfs.ext4 -F -L tradingsys "$DEVICE"
+MOUNT_UNIT="$(systemd-escape --path --suffix=mount "$DATA_ROOT")"
+echo "mounted: $(findmnt --noheadings --output SOURCE,FSTYPE,SIZE --target "$DATA_ROOT")"
+if systemctl list-unit-files "$MOUNT_UNIT" >/dev/null 2>&1; then
+    echo "owned by ${MOUNT_UNIT}, which is what RequiresMountsFor in the service unit resolves to"
 fi
-
-# ---------------------------------------------------------------------------
-step "mounting at ${DATA_ROOT}"
-# ---------------------------------------------------------------------------
-sudo mkdir -p "$DATA_ROOT"
-# discard passes TRIM through to the volume; noatime removes a write per read, which on
-# a database volume is a write we never read back.
-FSTAB_LINE="${DEVICE} ${DATA_ROOT} ext4 defaults,nofail,discard,noatime 0 2"
-if grep -qsF "$DEVICE" /etc/fstab; then
-    echo "already in /etc/fstab"
-else
-    echo "$FSTAB_LINE" | sudo tee -a /etc/fstab >/dev/null
-    echo "added to /etc/fstab"
+# An fstab entry alongside the .mount unit is the ambiguity described at the top of this
+# file. Reported rather than removed, because deleting someone's fstab line unattended is
+# worse than telling them it is there.
+if grep -qsE "[[:space:]]${DATA_ROOT}[[:space:]]" /etc/fstab; then
+    echo
+    echo "warning: /etc/fstab also has an entry for ${DATA_ROOT}, and the platform's" >&2
+    echo ".mount unit already owns this mount. Two definitions for one device is how a" >&2
+    echo "typo in a device name silently leaves you writing to the root disk. Review it:" >&2
+    grep -nE "[[:space:]]${DATA_ROOT}[[:space:]]" /etc/fstab >&2
+    echo
 fi
-sudo systemctl daemon-reload
-mountpoint -q "$DATA_ROOT" || sudo mount "$DATA_ROOT"
-mountpoint -q "$DATA_ROOT" || { echo "error: ${DATA_ROOT} did not mount" >&2; exit 1; }
-df -h "$DATA_ROOT" | tail -1
 
 # ---------------------------------------------------------------------------
 step "creating the data directories"

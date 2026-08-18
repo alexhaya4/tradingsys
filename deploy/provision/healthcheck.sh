@@ -9,7 +9,7 @@
 
 set -uo pipefail
 
-DATA_ROOT="${TRADINGSYS_DATA_ROOT:-/mnt/tradingsys_data}"
+DATA_ROOT="${TRADINGSYS_DATA_ROOT:-/mnt/tradingsys_db}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE="docker compose -f ${REPO_ROOT}/docker-compose.yml -f ${REPO_ROOT}/deploy/provision/docker-compose.prod.yml"
 FAILED=0

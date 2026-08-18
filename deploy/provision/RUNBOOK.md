@@ -23,18 +23,38 @@ runs there and this runbook reproduces the host.
 
 ## 1. Create the volume and the droplet
 
-Create the **block storage volume first**, in the same region, and note its name exactly.
-Do not let DigitalOcean format and mount it for you: choose the manual option, because
-`bootstrap.sh` formats it only if it has never been formatted and adds its own `/etc/fstab`
-entry with the mount options this workload wants.
+Create the **block storage volume first**, in the same region, and take DigitalOcean's
+**automatic format and mount**. That creates a systemd `.mount` unit, conventionally
+`mnt-<volume\x2dname>.mount`, mounted at `/mnt/<volume-name>`, and that unit is the single
+owner of the mount.
+
+**There is no `/etc/fstab` entry and none is needed. That is correct, not missing.**
+Adding one alongside the `.mount` unit is not redundancy, it is two definitions for one
+device, and a typo in the device name there fails silently: the volume simply does not
+mount and `df` reports the root disk while everything appears to work. `bootstrap.sh`
+therefore adopts the existing mount and refuses to create one, and warns if it finds an
+fstab entry for the same path.
 
 Create the droplet with `deploy/provision/cloud-init.yaml` pasted into the **User data**
 field, after replacing the SSH public key placeholder. Attach the volume to the droplet.
 
-Sizing rationale, from measurements in `PROGRESS.md`: at 243.81 bytes per uncompressed
-tick row and 21.90 compressed, 80 GB holds about 22 months of crypto ticks at a 40 per
-second combined rate once the 80 percent Postgres operating limit is respected. The volume
-exists so that outgrowing that is an online resize rather than a maintenance window.
+**Volume sizing, and why the current 20 GB is a first interval rather than a final
+answer.** At the measured 243.81 bytes per uncompressed tick row and 21.90 compressed,
+and respecting the 80 percent Postgres operating limit, a 20 GB volume holds:
+
+| Combined rate | Runway on 20 GB | Volume for a full 24 months |
+|---|---|---|
+| 20/s | 11.6 months | 38 GB |
+| 30/s | 6.9 months | 57 GB |
+| 40/s | 4.6 months | 76 GB |
+| 60/s | 2.3 months | 114 GB |
+| 80/s | 1.1 months | 152 GB |
+
+The rate is unmeasured until the weekday capture lands, which is why the volume was not
+sized to a guess. DigitalOcean volumes resize upward online at 0.10 USD per GB per month,
+so growing to 76 GB costs about 7.58 USD a month and is done without downtime. That is
+the escape hatch working as designed. What it does mean is that **the volume needs a
+decision within a few months of the recorder starting, not within two years.**
 
 ## 2. Get the repository onto the host
 
@@ -77,17 +97,20 @@ and the refresh call is not yet written.
 ## 4. Bootstrap
 
 ```bash
-deploy/provision/bootstrap.sh --volume-name YOUR_VOLUME_NAME
+deploy/provision/bootstrap.sh                      # adopts /mnt/tradingsys_db
+deploy/provision/bootstrap.sh --data-root /mnt/OTHER_VOLUME_NAME
 ```
 
 Idempotent. Run it again after any change to this directory, and re-run it rather than
 editing `/etc/systemd/system/tradingsys.service` in place, or the host stops being
 reproducible from the repository.
 
-It verifies the volume is attached, formats it only if it has never been formatted,
-mounts it permanently, creates `postgres` and `captures` directories with the ownership
-the containers need, checks the secrets, installs and enables the systemd unit, applies
-the migrations, and starts the stack.
+It adopts the mount the platform created, creates `postgres` and `captures` directories
+with the ownership the containers need, checks the secrets, installs and enables the
+systemd unit, applies the migrations, and starts the stack.
+
+**It does not format and it does not mount.** Removing `mkfs` also removed the only line
+in the script that could destroy recorded history.
 
 ## 5. Verify
 
@@ -128,7 +151,7 @@ run does not fill `/`.
 cd /opt/tradingsys
 set -a; . ./.env; set +a
 setsid nohup scripts/arm_crypto_capture.sh '2026-08-24 00:00:00' \
-    >> /mnt/tradingsys_data/captures/arm.log 2>&1 &
+    >> /mnt/tradingsys_db/captures/arm.log 2>&1 &
 ```
 
 The arming script polls the wall clock rather than sleeping an interval, and
@@ -141,7 +164,7 @@ it exists, but the fixes stay: they are correct independently of the host, and
 Read the result while it runs:
 
 ```bash
-cat /mnt/tradingsys_data/captures/*.json | python3 -m json.tool
+cat /mnt/tradingsys_db/captures/*.json | python3 -m json.tool
 ```
 
 Coverage per hour is reported in seconds beside each rate. An hour with low coverage is a
@@ -189,3 +212,29 @@ deploy/provision/healthcheck.sh
 
 Run `scripts/verify.sh` before pushing anything that will land here. It is the only
 verification path and CI runs the same script.
+
+---
+
+## The host, as provisioned
+
+Recorded so that a session that did not create it does not have to infer it.
+
+| | |
+|---|---|
+| Address | 206.189.147.213 |
+| Region | DigitalOcean SGP1, Singapore |
+| Image | Ubuntu 24.04 |
+| Droplet | 2 vCPU, 4 GB RAM, 80 GB disk |
+| Volume | 20 GB, XFS |
+| Volume mount | `/mnt/tradingsys_db`, owned by `mnt-tradingsys_db.mount` |
+| fstab entry | None, deliberately. See step 1 |
+
+The filesystem is XFS rather than ext4, which is what DigitalOcean's automatic format
+produces. It makes no difference to anything here: `bootstrap.sh` no longer formats, and
+XFS grows online with `xfs_growfs` exactly as the resize path needs.
+
+**Live venue observation should be run from this host and not from a workstation.** Four
+TCP connects from the development machine to the cTrader endpoint measured 211, 231, 219
+and 6461 ms, with three outright connection failures across several attempts, which is
+the same shape as the 23 DNS resolution failures in the last crypto capture. A
+measurement taken from there is a measurement of that link.
