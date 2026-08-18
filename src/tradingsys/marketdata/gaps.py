@@ -108,11 +108,16 @@ def coverage_from_timestamps(
             start = moment
         previous = moment
     intervals.append((start, previous))
-    # A single observation covers an instant, not a span. Widening it to max_quiet
-    # would invent coverage we do not have.
-    return tuple((first, last) for first, last in intervals if last > first) or tuple(
-        (first, first) for first, last in intervals
-    )
+    # A single observation covers an instant, not a span. Widening it to max_quiet would
+    # invent coverage we do not have, and dropping it would claim we hold nothing at an
+    # instant we demonstrably observed. Zero width intervals are therefore kept.
+    #
+    # WHAT BREAKS IF THESE ARE FILTERED: an earlier version discarded them unless every
+    # interval was zero width, so a lone tick between two busy stretches vanished while
+    # a lone tick on its own survived. That is the reconnect case exactly: a stream that
+    # delivers one quote and drops again reported no coverage at all, so the outage read
+    # as longer than it was.
+    return tuple(intervals)
 
 
 def merge_coverage(intervals: Iterable[Interval]) -> tuple[Interval, ...]:

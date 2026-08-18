@@ -21,11 +21,14 @@ import pytest
 from tests.factories import btcusdt, eurusd, eurusd_lots, usdjpy
 from tradingsys.core.errors import PersistenceError
 from tradingsys.core.provenance import ProvenanceError, TickSource
+from tradingsys.marketdata.gaps import coverage_from_timestamps
 from tradingsys.persistence.audit import GENESIS_HASH, AuditCategory
 from tradingsys.venues.enums import CandlePrice, Granularity
 from tradingsys.venues.models import Candle, Quote
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from tradingsys.persistence.audit import AuditLog
     from tradingsys.persistence.database import Database
     from tradingsys.persistence.repositories import InstrumentRepository, MarketDataRepository
@@ -699,3 +702,105 @@ class TestAuditLogStorage:
         await self._append(audit_log, 0)
         entries = await audit_log.read()
         assert entries[0].ts.utcoffset() == timedelta(0)
+
+
+@pytest.mark.integration
+class TestTickCoverage:
+    """The SQL coverage query against the Python one it deliberately duplicates.
+
+    `MarketDataRepository.tick_coverage` pushes the coverage calculation into the
+    database because a busy day holds over a million timestamps per instrument and the
+    client side version needs all of them. That is a second definition of one rule, and
+    a second definition is what drifts, so these tests pin them to agree.
+    """
+
+    @staticmethod
+    async def _store(
+        instruments: InstrumentRepository,
+        market_data: MarketDataRepository,
+        offsets: Sequence[float],
+    ) -> tuple[int, list[datetime]]:
+        instrument = btcusdt()
+        row_id = await instruments.upsert(instrument)
+        base = datetime(2026, 8, 19, 10, 0, tzinfo=UTC)
+        stamps = [base + timedelta(seconds=offset) for offset in offsets]
+        await market_data.store_ticks(
+            row_id,
+            TickSource.BYBIT,
+            [
+                Quote(
+                    instrument_id=instrument.id,
+                    ts=stamp,
+                    bid=Decimal("1880.00"),
+                    ask=Decimal("1880.01"),
+                )
+                for stamp in stamps
+            ],
+        )
+        return row_id, stamps
+
+    async def test_it_agrees_with_the_python_implementation(
+        self, instruments: InstrumentRepository, market_data: MarketDataRepository
+    ) -> None:
+        # Two stretches separated by a five minute silence, plus a lone tick after it.
+        offsets = [0, 1, 2, 3, 300, 301, 302, 900]
+        max_quiet = timedelta(seconds=60)
+        row_id, stamps = await self._store(instruments, market_data, offsets)
+
+        from_sql = await market_data.tick_coverage(
+            row_id,
+            TickSource.BYBIT,
+            start=stamps[0],
+            end=stamps[-1] + timedelta(seconds=1),
+            max_quiet=max_quiet,
+        )
+        from_python = coverage_from_timestamps(stamps, max_quiet=max_quiet)
+
+        assert list(from_python) == list(from_sql)
+
+    async def test_a_single_tick_is_an_instant_not_a_discard(
+        self, instruments: InstrumentRepository, market_data: MarketDataRepository
+    ) -> None:
+        """Dropping it would report the surrounding time as one long gap, which is a
+        larger error than the zero width interval it avoids."""
+        row_id, stamps = await self._store(instruments, market_data, [0])
+
+        covered = await market_data.tick_coverage(
+            row_id,
+            TickSource.BYBIT,
+            start=stamps[0],
+            end=stamps[0] + timedelta(minutes=1),
+            max_quiet=timedelta(seconds=60),
+        )
+
+        assert covered == ((stamps[0], stamps[0]),)
+
+    async def test_no_ticks_means_no_coverage(
+        self, instruments: InstrumentRepository, market_data: MarketDataRepository
+    ) -> None:
+        row_id, stamps = await self._store(instruments, market_data, [0])
+
+        covered = await market_data.tick_coverage(
+            row_id,
+            TickSource.BYBIT,
+            start=stamps[0] + timedelta(hours=1),
+            end=stamps[0] + timedelta(hours=2),
+            max_quiet=timedelta(seconds=60),
+        )
+
+        assert covered == ()
+
+    async def test_a_non_positive_max_quiet_is_refused(
+        self, instruments: InstrumentRepository, market_data: MarketDataRepository
+    ) -> None:
+        """Zero would make every tick its own island."""
+        row_id, stamps = await self._store(instruments, market_data, [0])
+
+        with pytest.raises(PersistenceError, match="max_quiet must be positive"):
+            await market_data.tick_coverage(
+                row_id,
+                TickSource.BYBIT,
+                start=stamps[0],
+                end=stamps[0] + timedelta(hours=1),
+                max_quiet=timedelta(0),
+            )

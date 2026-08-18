@@ -17,6 +17,7 @@ Storage conventions:
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING, Final, final
 
 from tradingsys.core.errors import PersistenceError
@@ -247,6 +248,32 @@ class InstrumentRepository:
         )
 
 
+_TICK_COVERAGE = """
+WITH ordered AS (
+    SELECT ts, lag(ts) OVER (ORDER BY ts) AS previous
+    FROM ticks
+    WHERE instrument_id = $1 AND source = $2 AND ts >= $3 AND ts < $4
+),
+marked AS (
+    SELECT ts, CASE WHEN previous IS NULL OR ts - previous > $5 THEN 1 ELSE 0 END AS breaks
+    FROM ordered
+),
+islands AS (
+    SELECT ts, sum(breaks) OVER (ORDER BY ts) AS island FROM marked
+)
+SELECT min(ts) AS covered_from, max(ts) AS covered_to
+FROM islands
+GROUP BY island
+ORDER BY covered_from
+"""
+"""Gaps and islands: a break starts a new island whenever the step exceeds max_quiet.
+
+Kept as one statement so the whole window is scanned once. The alternative, fetching
+timestamps and grouping them in Python, moves over a million rows per instrument per
+busy day across the wire to compute a handful of intervals.
+"""
+
+
 @final
 class MarketDataRepository:
     """Stores and retrieves bars and ticks."""
@@ -348,6 +375,38 @@ class MarketDataRepository:
         query, args = build_tick_query(instrument_row_id, source, start=start, end=end, limit=limit)
         rows = await self._database.fetch(query, *args)
         return tuple(quote_from_row(row) for row in rows)
+
+    async def tick_coverage(
+        self,
+        instrument_row_id: int,
+        source: TickSource,
+        *,
+        start: datetime,
+        end: datetime,
+        max_quiet: timedelta,
+    ) -> tuple[tuple[datetime, datetime], ...]:
+        """Intervals over which ticks were actually recorded, computed in the database.
+
+        The same question :func:`~tradingsys.marketdata.gaps.coverage_from_timestamps`
+        answers, pushed down to SQL because the client side version needs every
+        timestamp in the window and a busy day holds well over a million of them per
+        instrument. `tests/persistence` pins the two against each other on identical
+        data, because a second definition of one rule is exactly what drifts.
+
+        ``max_quiet`` is what separates a quiet market from a stopped feed, and it has
+        no universally correct value, so it is required here as it is there.
+
+        Returns:
+            Ascending, disjoint ``(start, end)`` pairs. An interval runs from its first
+            tick to its last, so a stretch with one tick has zero width and is reported
+            as an instant rather than being discarded.
+        """
+        if max_quiet <= timedelta(0):
+            raise PersistenceError(f"max_quiet must be positive, got {max_quiet}")
+        rows = await self._database.fetch(
+            _TICK_COVERAGE, instrument_row_id, source.value, start, end, max_quiet
+        )
+        return tuple((row["covered_from"], row["covered_to"]) for row in rows)
 
     async def fetch_calibration_ticks(
         self,

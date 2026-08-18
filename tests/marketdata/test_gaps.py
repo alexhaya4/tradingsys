@@ -399,3 +399,55 @@ class TestWindowValidation:
 
     def test_an_empty_window_reports_nothing(self) -> None:
         assert find_gaps(FOREX_WEEK, [], start=utc(2025, 3, 5), end=utc(2025, 3, 5)) == ()
+
+
+class TestALoneTickIsCoverage:
+    """Found by wiring gap detection into the assembly, not by reading the module.
+
+    An earlier version filtered zero width intervals unless every interval was zero
+    width, so a lone tick on its own survived and a lone tick between two busy stretches
+    vanished. The second is the reconnect case: a stream that delivers one quote and
+    drops again reported no coverage at all, and the outage read as longer than it was.
+    """
+
+    def test_a_lone_tick_between_two_stretches_is_kept(self) -> None:
+        base = utc(2025, 3, 5, 10)
+        stamps = [
+            base,
+            base + timedelta(seconds=1),
+            base + timedelta(minutes=5),
+            base + timedelta(minutes=10),
+            base + timedelta(minutes=10, seconds=1),
+        ]
+
+        covered = coverage_from_timestamps(stamps, max_quiet=timedelta(seconds=60))
+
+        assert len(covered) == 3
+        assert covered[1] == (base + timedelta(minutes=5), base + timedelta(minutes=5))
+
+    def test_a_lone_tick_at_the_end_is_kept(self) -> None:
+        base = utc(2025, 3, 5, 10)
+        stamps = [base, base + timedelta(seconds=1), base + timedelta(minutes=5)]
+
+        covered = coverage_from_timestamps(stamps, max_quiet=timedelta(seconds=60))
+
+        assert len(covered) == 2
+        assert covered[-1] == (base + timedelta(minutes=5), base + timedelta(minutes=5))
+
+    def test_a_lone_tick_alone_is_still_kept(self) -> None:
+        """The case the old code got right, pinned so the fix does not trade one for
+        the other."""
+        base = utc(2025, 3, 5, 10)
+
+        covered = coverage_from_timestamps([base], max_quiet=timedelta(seconds=60))
+
+        assert covered == ((base, base),)
+
+    def test_the_instant_is_not_widened_to_max_quiet(self) -> None:
+        """Widening would invent coverage we do not have, which is the error in the
+        opposite direction and the reason the filter existed at all."""
+        base = utc(2025, 3, 5, 10)
+
+        (interval,) = coverage_from_timestamps([base], max_quiet=timedelta(minutes=5))
+
+        assert interval[1] - interval[0] == timedelta(0)
