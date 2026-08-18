@@ -7,6 +7,20 @@ bound to an internal interface without exposing anything else.
 ``/health`` is liveness: it answers as long as the event loop is running and does not
 touch any dependency. ``/ready`` is readiness: it runs the registered checks and returns
 503 when any fails, which is what a load balancer or orchestrator acts on.
+
+**Liveness names what it does not check.** The check list is empty by design, because
+liveness answers "should this process be restarted" and restarting cannot fix a
+dependency that is down. The only internal invariant worth restarting for is a wedged
+event loop, and a wedged loop cannot serve the request that would report it, so a stall
+detector registered here could not fail in any case its own response survives. The
+response saying 200 is already the loop proving it scheduled a task.
+
+That leaves a real risk, which is that an endpoint asserting nothing gets trusted for
+more than it checks. The answer is not a check that cannot fail. It is for the response
+to say what it does not cover and where that question is answered, which is what
+``asserts``, ``does_not_check`` and ``readiness`` below do. The list is read from the
+readiness registry rather than written here, so an endpoint cannot drift into claiming
+coverage of a check that was added or removed elsewhere.
 """
 
 from __future__ import annotations
@@ -89,7 +103,20 @@ def build_operational_app(
     async def health(_request: Request) -> Response:
         """Liveness. Answers as long as the process can serve a request."""
         if liveness is None:
-            return JSONResponse({"status": "pass", "time": utc_now().isoformat(), "checks": []})
+            return JSONResponse(
+                {
+                    "status": "pass",
+                    "time": utc_now().isoformat(),
+                    "checks": [],
+                    "asserts": (
+                        "this process is running and its event loop scheduled the task "
+                        "that produced this response"
+                    ),
+                    "does_not_check": [check.name for check in readiness.checks],
+                    "readiness": settings.ready_path,
+                },
+                status_code=200,
+            )
         report = await liveness.evaluate()
         return JSONResponse(
             {**report.to_mapping(), "time": utc_now().isoformat()},

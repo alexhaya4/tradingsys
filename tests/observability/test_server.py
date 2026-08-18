@@ -128,6 +128,49 @@ class TestHealthEndpoint:
         stamp = (await client.get("/health")).json()["time"]
         assert datetime.fromisoformat(stamp).tzinfo is not None
 
+    async def test_liveness_names_what_it_does_not_check(self) -> None:
+        """An endpoint asserting nothing gets trusted for more than it checks. The
+        answer is not a check that cannot fail, it is a response that says so."""
+        readiness = HealthRegistry(timeout_seconds=1.0)
+        readiness.register(ScriptedCheck("database", HealthStatus.PASS))
+        readiness.register(ScriptedCheck("redis", HealthStatus.PASS))
+        body = (await request(build_app(readiness=readiness), "/health")).json()
+
+        assert body["checks"] == []
+        assert body["does_not_check"] == ["database", "redis"]
+        assert body["readiness"] == "/ready"
+        assert "event loop scheduled" in body["asserts"]
+
+    async def test_the_uncovered_list_is_read_from_the_registry(self) -> None:
+        """Written by hand it would drift into claiming coverage of a check that had
+        been added or removed elsewhere, which is the failure it exists to prevent."""
+        readiness = HealthRegistry(timeout_seconds=1.0)
+        readiness.register(ScriptedCheck("database", HealthStatus.PASS))
+        first = (await request(build_app(readiness=readiness), "/health")).json()
+        readiness.register(ScriptedCheck("ingest_progress", HealthStatus.PASS))
+        second = (await request(build_app(readiness=readiness), "/health")).json()
+
+        assert first["does_not_check"] == ["database"]
+        assert second["does_not_check"] == ["database", "ingest_progress"]
+
+    async def test_the_readiness_pointer_follows_configuration(self) -> None:
+        """The paths are configurable, so a hardcoded pointer would send an operator to
+        a 404 on any deployment that moved them."""
+        app = build_app(observability=settings(health_path="/livez", ready_path="/readyz"))
+        body = (await request(app, "/livez")).json()
+
+        assert body["readiness"] == "/readyz"
+
+    async def test_supplied_liveness_checks_replace_the_explanation(self) -> None:
+        """When there is something real to report, the report is the answer and the
+        explanation of an empty list would be false."""
+        liveness = HealthRegistry(timeout_seconds=1.0)
+        liveness.register(ScriptedCheck("event_loop", HealthStatus.PASS))
+        body = (await request(build_app(liveness=liveness), "/health")).json()
+
+        assert body["checks"][0]["name"] == "event_loop"
+        assert "does_not_check" not in body
+
 
 class TestReadyEndpoint:
     async def test_ready_with_all_checks_passing(self) -> None:
