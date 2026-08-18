@@ -1053,6 +1053,47 @@ defaulted into: the volume size required for 24 months at the measured p95 hour 
 the retention window that fits comfortably inside 60 GB at that same rate, both priced.
 The default of buying disk is not to be taken silently.
 
+### Two components marked complete does not mean the path between them exists
+
+Directed by the director on 2026-08-19, on the third instance of the same shape.
+
+**The three instances.** `app/ingest.py`, written and configured and reaching no entry
+point. `venues/ctrader/source.py`, written and reaching no caller and no test. And
+`venues/bybit/instruments.py`, whose mapping functions are complete and correct while
+nothing presents them as an `InstrumentSource`, so the registry cannot sync the one venue
+we actually record. In every case both endpoints were genuinely done and the edge between
+them did not exist.
+
+**Why a status column hides it.** "Complete" is a claim about a component in isolation,
+and a component in isolation is exactly the thing that can be finished while unreachable.
+Two adjacent rows both saying Complete reads as a working path, and nothing in either row
+is false. The reader supplies the edge, because rows next to each other in a table look
+connected.
+
+**The rule.** A tracker row that claims a component is complete **names what constructs it
+and what it constructs or feeds**. A row that cannot name both has an unbuilt path, and
+the gap is then visible in the row rather than discoverable only by tracing the call
+graph. `NOTHING` is a finding and is written as one.
+
+**What the audit found on applying it**, beyond the three already known:
+
+*`find_gaps` has no production caller.* Gap detection is exported and tested and no code
+in the running system calls it. The backfill uses `missing_open_hours`, which is hour
+granularity for queueing work and a different function for a different purpose. So
+`SPEC.md` phase 2's exit criterion that gap detection be "proven by deliberate
+disconnection" currently has nothing to prove: the capability exists as a library and the
+system does not use it. This is the most consequential result of the audit, because it is
+an exit criterion rather than an internal component.
+
+*`HttpHourFetcher` has no tests* and is constructed only by
+`scripts/crosscheck_release_spread.py`. It is the component that actually performs every
+backfill fetch, reached in production through `BackfillRunner`, and its only exercise is
+a measurement script that is not run by CI.
+
+*Nearly every live-ingest component terminates at the same missing root*, the runtime
+assembly. That is one gap rather than many, and stating it that way is the difference
+between a plan and a list.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited

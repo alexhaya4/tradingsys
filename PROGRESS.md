@@ -306,34 +306,47 @@ is either done or is a decision waiting on the director.
    a capital finding rather than a bug, and the arithmetic is in "What the account can
    actually trade" below. Do not try to fix it in code.
 
-### Task status, as of 2026-08-18T07:20Z
+### Task status, as of 2026-08-19T00:20Z
 
-| Task | Status | Notes |
-|---|---|---|
-| Schedule-aware gap detection | Complete | Compares coverage against `TradingSchedule`; weekends, holidays and session boundaries are never reported as gaps. Both daylight saving transitions pinned |
-| Dukascopy `.bi5` reader | Complete | In house, validated payloads, exact prices and volumes, byte for byte round trip against a recorded hour |
-| Bybit instrument metadata | Complete | Mapped from `instruments-info`, tested against recorded responses |
-| Bybit public REST client and rate limiter | Complete | Envelope checked, 403 treated as a ten minute block, retries with jittered backoff |
-| Bybit WebSocket quote stream | Complete | `orderbook.1`, reconnects with resynchronisation, silence treated as death |
-| Quote recorder into the tick table | Complete | Batched, retried, flushed on shutdown, tagged with its source |
-| Instrument eligibility screen | Complete | Configurable maximum deviation from intended risk, evaluated against live metadata |
-| Funding drag measurement | Complete | Reported below |
-| CI probe diagnosis and repair | Complete | Race not regression, proven by re-run. Cause unexplained; probe repaired so a recurrence is diagnosable from the log |
-| cTrader adapter: transport | Complete | TLS, length prefixed protobuf framing, handshake, live flag assertion, heartbeat. Verified against the real demo account |
-| cTrader adapter: symbol metadata | Complete | Digits, pip position, volumes, swap rates and charging convention, trading mode, schedule |
-| Instrument registry from venue metadata | **Partial** | `RegistrySync` is complete and tested at 94 percent: it compares before writing and reports drift by field. `venues/ctrader/source.py` measures 0 percent coverage and is constructed by nothing, so the cTrader source is written and unverified |
-| Resumable Dukascopy backfill | Complete | Queue, runner, HTTP fetcher. Concurrency 3, retries with backoff, failed hours retried rather than skipped |
-| Backfill caller | Complete | Queues missing open hours from the instrument's own schedule, then drains |
-| Capital independence, SPEC 6.1 | Complete | Dynamic screen, property tests over eight orders of magnitude, structural guard against absolute amounts |
-| Sizing deliverable | Complete | Reported below. No forex class is eligible at 200 USD |
-| Round trip cost measurement | Complete | Reported below. Commission dominates; spread is near zero on a raw account |
-| Supervised ingest process | **Not complete** | `Supervisor` is complete and tested at 98 percent. `app/ingest.py` measures 0 percent coverage across 71 statements, is constructed by no entry point, and `IngestPlan` has no configuration section. Written, unwired, untested |
-| **cTrader live quote subscription** | **Not started** | **The only thing blocking the 72 hour run** |
-| cTrader refresh token call | Not started | Credentials are modelled and expiry is on the interface; the HTTP refresh call is not written |
-| Reconnection with resynchronisation | Not started | Deliberately deferred: it belongs with the subscription state it must restore, and that state does not exist until the spot subscription does |
-| Weekday crypto rate capture | **Failed, not rerun** | Three attempts, all lost to the clock defect. No usable profile exists |
-| Crypto retention window | **Blocked** | Cannot be sized until a capture succeeds |
-| 72 hour continuous ingestion run | **Blocked** | Needs the cTrader spot subscription, the ingest wiring above, and a host that does not suspend |
+**Every row names what constructs the component and what the component constructs or
+feeds.** A row that cannot name both has an unbuilt path, and that is the defect this
+column exists to surface: three times now a component has been marked Complete while
+nothing reached it. `NOTHING` in the constructed-by column is a finding, not a formatting
+placeholder.
+
+The assembly referred to below is the runtime wiring that does not yet exist. Almost
+every live-ingest component terminates there, so these are one missing root rather than
+many missing links.
+
+| Task | Status | Constructed by | Feeds | Notes |
+|---|---|---|---|---|
+| Schedule-aware gap detection | **Complete but unreached** | NOTHING | NOTHING | `find_gaps` and `coverage_from_timestamps` are exported and tested and **no production code calls either**. The backfill uses `missing_open_hours` in `backfill_job.py`, which is hour granularity for queueing and a different function. So `SPEC.md` phase 2's "gap detection proven by deliberate disconnection" has no code path in the running system today |
+| Dukascopy `.bi5` reader | Complete | `marketdata/backfill.py` | Backfill runner | Byte for byte round trip against a recorded hour |
+| Bybit instrument metadata | Complete | NOTHING | Would feed `BybitInstrumentSource`, which does not exist | Mapping functions only. Nothing presents them as an `InstrumentSource`, so the registry cannot sync Bybit |
+| Bybit public REST client and rate limiter | Complete | NOTHING | Assembly, then `BybitInstrumentSource` | Envelope checked, 403 as a ten minute block |
+| Bybit WebSocket quote stream | Complete | NOTHING | Assembly, then `QuoteRecorder` | `orderbook.1`, resynchronises, silence treated as death |
+| Quote recorder into the tick table | Complete | `IngestProcess`, injected | `MarketDataRepository.store_ticks` | Batched, retried, flushed on shutdown |
+| Instrument eligibility screen | Complete | NOTHING | Reporting and phase 5 | Evaluated against live metadata |
+| Funding drag measurement | Complete | Measurement, not a component | `SPEC.md` 5.5 | Reported below |
+| CI probe diagnosis and repair | Complete | `scripts/verify.sh` | CI | Cause unexplained; probe repaired so a recurrence is diagnosable |
+| cTrader adapter: transport | Complete | `scripts/check_venue_assumptions.py`, assembly | Symbols, spots, source | Verified against the real demo account |
+| cTrader adapter: symbol metadata | Complete | `venues/ctrader/source.py` | Instrument definitions | Digits, volumes, swap, schedule |
+| cTrader spot subscription | Complete | NOTHING | Assembly, then `QuoteRecorder` | Verified live: 146 events, 146 quotes across four pairs. Half-quote path proven by test only, since the venue sent both sides on every event |
+| Instrument registry from venue metadata | **Partial** | NOTHING | `InstrumentRepository` | `RegistrySync` tested at 94 percent. `venues/ctrader/source.py` at 0 percent and constructed by nothing. No Bybit source exists at all |
+| Resumable Dukascopy backfill | Complete | `BackfillJob` | Tick storage | `HttpHourFetcher` has **no tests** and is constructed only by `scripts/crosscheck_release_spread.py` |
+| Backfill caller | Complete | NOTHING | Backfill runner and queue | Queues missing open hours from the instrument's own schedule |
+| Capital independence, SPEC 6.1 | Complete | `risk/screen.py` | Eligibility verdicts | Property tests over eight orders of magnitude |
+| Sizing deliverable | Complete | Measurement, not a component | `SPEC.md` 6.2 | No forex class is eligible at 200 USD |
+| Round trip cost measurement | Complete | Measurement, not a component | Phase 3 cost model | Commission dominates |
+| Supervised ingest process | **Partial** | NOTHING | `Supervisor`, recorder, registry, backfill | `Supervisor` at 98 percent and `app/ingest.py` now tested and configured. Still constructed by no entry point: the assembly is the missing root |
+| Ingest configuration | Complete | `Settings` | `IngestPlan.from_settings` | Deadline against interval, and window against deadline, validated at load |
+| **Runtime assembly** | **Not started** | Would be `Application.start` | Everything above | The missing root. Needs `BybitInstrumentSource` first |
+| **`BybitInstrumentSource`** | **Not started** | Would be assembly | `RegistrySync` | Scope addition found 2026-08-19 by tracing, not listed before |
+| cTrader refresh token call | Not started | Would be `CTraderConnection` | Credential rotation | Access token expires about 30 days from issue |
+| Reconnection with resynchronisation | Not started | Would be assembly | Spot stream, `forget()` | `CTraderSpotStream.forget()` exists for it. Forex ingest waits on this rather than shipping a leg that dies on first disconnect |
+| Weekday crypto rate capture | **Failed, not rerun** | Operator, on the VPS | Retention sizing, repeat decision | Three attempts lost to the clock defect |
+| Crypto retention window | **Blocked** | Decision | Volume sizing | Priced against the volume when the capture lands |
+| 72 hour continuous ingestion run | **Blocked** | Operator, on the VPS | Phase 2 exit | Needs the assembly, reconnection, and the VPS |
 
 ### Outstanding work, in the order it should be done
 
