@@ -4,21 +4,24 @@ Companion to `SPEC.md`. This file is updated as work completes. `SPEC.md` is
 not modified except by explicit direction from the director.
 
 **Current phase:** 2, Market data
-**Status as of 2026-08-16T17:45Z:** in progress. CI is green on HEAD. Phase 1 is
-complete and accepted; its record is kept below unchanged.
+**Status as of 2026-08-18T07:20Z:** in progress and not complete. CI is green on HEAD.
+The 72 hour ingestion run that closes the phase is blocked on one missing piece of
+protocol work, the cTrader spot subscription. Phase 1 is complete and accepted; its
+record is kept below unchanged.
 
-**Decisions taken during implementation now live in `docs/DECISIONS.md`.** They
-were moved there on 2026-08-16 because `SPEC.md` section 13 already sent a
-recovering session to that path and the file did not exist. Rulings are permanent
-and this tracker is not, so keeping them here meant rewriting them every time the
-tracker was rewritten.
+**Read the phase 2 "Start here" section before doing anything.** It names the single
+next task and the two findings a fresh session would otherwise waste time
+rediscovering.
 
-**Every status claim in this file states the time it describes.** The previous
-capture did not, and it arrived stale: it was written while a pipeline was still
-running, recorded CI as red when the next run had already turned it green, and
-counted two CI runs when a third existed. Both claims were false by the time they
-were read. A tracker written mid-run either dates its claims or misleads the
-session it was written for.
+**Decisions taken during implementation live in `docs/DECISIONS.md`.** That is the file
+`SPEC.md` section 13 directs a recovering session to, and it was created on 2026-08-16
+because the path was referenced and the file did not exist. Rulings are permanent and
+this tracker is not, so keeping them here meant rewriting them whenever the tracker was
+rewritten.
+
+**Every status claim in this file states the time it describes.** An earlier capture did
+not and arrived stale: written mid-run, it recorded CI as red when the next run had
+already turned it green, and counted two CI runs when a third existed.
 
 ---
 
@@ -271,134 +274,78 @@ Two items remain open for phase 2:
 
 ## Phase 2: Market data
 
-**Status:** in progress. Written to be read cold. Everything a session needs to
-resume is in this section; nothing depends on remembering a conversation.
+**Every status claim in this section states the time it describes.** An earlier capture
+of this file did not, and arrived stale: it recorded CI as red when the next run had
+already turned it green, and counted two CI runs when a third existed. A tracker written
+mid-run either dates its claims or misleads the session it was written for.
 
-### The CI failure of 2026-08-16T09:44Z, diagnosed and recorded as unexplained
+### Start here, as of 2026-08-18T07:20Z
 
-**Status as of 2026-08-16T17:45Z: closed as unexplained, not as fixed.** The
-probe that reported it has been repaired, and the underlying event has no
-established mechanism. Recorded that way deliberately: a tracker that says
-"fixed" when nobody found the cause is how the same failure gets misdiagnosed
-the next time it appears.
+**Phase 2 is not complete and its exit criteria are not met.** The gate is a 72 hour
+continuous ingestion run across both venues, and that is blocked on one missing piece of
+protocol work.
 
-The failure was run 31939779488, commit `aa3e501`:
-
-```
-verify: /metrics did not expose tradingsys_build_info
-Error: Process completed with exit code 1
-```
-
-**Classification: a race, not a regression. Proven, not inferred.**
-
-| Run | Commit | Result |
-|---|---|---|
-| 31939273660 | `e01e36d` | success, 2m19s |
-| 31939779488 | `aa3e501` | **failure**, 1m50s |
-| 31941861860 | `7a3617a` | success, 2m24s |
-| 31939779488, re-run 2026-08-16T10:44Z | `aa3e501`, unchanged | **success** |
-
-The same commit passes on re-run. The commits either side changed markdown only.
-
-**The original hypothesis was wrong, and this is the part worth carrying.** The
-previous capture proposed that readiness was lying: that the app reported ready
-before the metric was registered. That cannot happen. `/ready` and `/metrics` are
-two routes on one Starlette app built by `build_operational_app`, both closing
-over a single `Metrics` object created in `Application.build`
-(`src/tradingsys/app/runtime.py:94`), and `build_info.labels(...).set(1)` runs
-synchronously inside `Metrics.create` (`metrics.py:120`), before `start()`
-connects anything and long before `serve()` binds the port. One call site, one
-registry. If the port answers at all, the series is already registered and set.
-
-Tested rather than only read:
-
-| Test | Result |
+| | |
 |---|---|
-| 40 app restarts, readiness polled exactly as `verify.sh` does, then the probe | 40/40 exposed the series; ready in 1 to 2s; body 5825 to 5828 bytes |
-| 4000 requests at concurrency 60, interleaved with `/ready` evaluations mutating the same registry | 4000 x HTTP 200, zero responses missing the sample line |
-| The exact probe pipeline, 300 runs, GNU grep | zero failures |
+| Branch | `phase-2-market-data` at `d4207dc`, pushed. `main` is still the phase 1 commit `49512cf` and phase 2 is not merged into it |
+| CI | Green on HEAD. Runs `scripts/verify.sh --fresh --down` on every branch |
+| Tests | 1230 unit, 87 integration. `ruff` format and check clean, `mypy --strict` clean over 125 files |
+| Working tree | Clean |
 
-**What the evidence still does not explain.** curl completed a round trip in
-13.4ms, the same as the successful runs, exited zero, printed nothing, and the
-match failed. The container logs show one process, one startup, no restart, no
-exception. The `pipefail` broken-pipe mechanism described below is real and was
-reproduced, but it announces itself with `curl: (23) Failure writing output to
-destination`, and that string appears nowhere in the run log, which does capture
-stderr. No mechanism in this codebase produces that body, and it did not
-reproduce locally in roughly 4400 requests and 40 fresh starts.
+**The single next task is the cTrader spot subscription.** Without it there is no live
+forex quote stream, so the 72 hour run cannot start, because `SPEC.md` section 8 requires
+continuous ingestion for both venues and only crypto is live. Everything else in phase 2
+is either done or is a decision waiting on the director.
 
-**What was actually defective, and is now fixed.** The probe itself, at
-`scripts/verify.sh`. It piped curl into `grep -q`, which had two defects: it
-reported a refused connection, an HTTP error, a broken pipe, and a genuinely
-missing series with one identical message and no trace of what came back, and
-under `pipefail` it could fail while the series was present. See
-`docs/DECISIONS.md` for the ruling and `TestChecksDoNotDiscardTheirEvidence` in
-`tests/test_verification_path.py` for the guard.
+**Two things a fresh session would otherwise waste time rediscovering:**
 
-The practical consequence: if this recurs, the log will carry the byte count, the
-HTTP status or curl's exit code, and the first twenty lines of the body. It will
-be diagnosable from the log rather than by re-running the pipeline.
+1. This host suspends. Anything measuring elapsed time must use wall clock, never a
+   monotonic clock, and must record its own coverage. This has now cost three separate
+   failures. See "The clock defect class" below before writing anything with a timer.
+2. Forex is not tradeable at 200 USD on the current venue, at any stop distance. That is
+   a capital finding rather than a bug, and the arithmetic is in "What the account can
+   actually trade" below. Do not try to fix it in code.
 
-### Still open for the director: what `/health` asserts
-
-Unchanged and not answered by the above. `/health` returned `"checks":[]` on the
-failing run while `/ready` reported database and redis passing. The empty list is
-intended: see `src/tradingsys/observability/server.py:89`, where liveness returns
-an empty report when no liveness checks are registered, and the docstring at line
-84 explains why. Liveness must not depend on anything external, or a database
-blip restarts a perfectly healthy process. That is the standard split.
-
-The director's concern is not addressed by that: an endpoint that asserts nothing
-reports healthy through an outage and gets trusted for more than it checks. What
-`/health` currently asserts is real but narrow, namely that the process is
-running, the event loop is turning, and the server can accept a connection and
-serve a response. What it does not assert is any internal invariant. Whether to
-register one, such as a stalled loop detector, is the director's decision and is
-to be brought with evidence rather than resolved quietly.
+### Task status, as of 2026-08-18T07:20Z
 
 | Task | Status | Notes |
 |---|---|---|
-| Schedule-aware gap detection | Complete | Compares coverage against `TradingSchedule`, so weekends, holidays, and session boundaries are never reported. Both daylight saving transitions pinned |
+| Schedule-aware gap detection | Complete | Compares coverage against `TradingSchedule`; weekends, holidays and session boundaries are never reported as gaps. Both daylight saving transitions pinned |
 | Dukascopy `.bi5` reader | Complete | In house, validated payloads, exact prices and volumes, byte for byte round trip against a recorded hour |
 | Bybit instrument metadata | Complete | Mapped from `instruments-info`, tested against recorded responses |
 | Bybit public REST client and rate limiter | Complete | Envelope checked, 403 treated as a ten minute block, retries with jittered backoff |
-| Bybit WebSocket quote stream | Complete | orderbook.1, reconnects with resynchronisation, silence treated as death |
+| Bybit WebSocket quote stream | Complete | `orderbook.1`, reconnects with resynchronisation, silence treated as death |
 | Quote recorder into the tick table | Complete | Batched, retried, flushed on shutdown, tagged with its source |
 | Instrument eligibility screen | Complete | Configurable maximum deviation from intended risk, evaluated against live metadata |
 | Funding drag measurement | Complete | Reported below |
-| CI probe diagnosis and repair | Complete | Race, not regression, proven by re-run. Cause unexplained; probe repaired so a recurrence is diagnosable from the log |
-| cTrader adapter: transport | Complete | TLS, framing, handshake, live flag assertion, heartbeat. Verified against the real demo venue |
-| cTrader adapter: symbol metadata | Complete | Digits, pip position, volumes, swap rates and charging convention, trading mode, schedule. Verified against the live catalogue |
-| Sizing deliverable, forex half | Complete | Reported below. All four pairs excluded at a 1 percent stop |
-| Capital independence, SPEC 6.1 | Complete | Dynamic screen, property tests over eight orders of magnitude, structural guard against absolute amounts |
-| Resumable Dukascopy backfill | Complete | Queue, runner, HTTP fetcher. Concurrency 3, retries with backoff, failed hours retried not skipped |
+| CI probe diagnosis and repair | Complete | Race not regression, proven by re-run. Cause unexplained; probe repaired so a recurrence is diagnosable from the log |
+| cTrader adapter: transport | Complete | TLS, length prefixed protobuf framing, handshake, live flag assertion, heartbeat. Verified against the real demo account |
+| cTrader adapter: symbol metadata | Complete | Digits, pip position, volumes, swap rates and charging convention, trading mode, schedule |
 | Instrument registry from venue metadata | Complete | Sync compares before writing and reports drift by field. cTrader source built |
+| Resumable Dukascopy backfill | Complete | Queue, runner, HTTP fetcher. Concurrency 3, retries with backoff, failed hours retried rather than skipped |
 | Backfill caller | Complete | Queues missing open hours from the instrument's own schedule, then drains |
-| Resumable Dukascopy backfill | Not started | Reader and gap detector are done; the runner over `backfill_hours` is not |
-| Supervised ingest process | Complete | Supervisor reports on progress, not liveness. Registry sync, crypto quotes, periodic backfill |
-| cTrader live quote subscription | Not started | Blocks the 72 hour run: no live forex quotes without it |
-| 72 hour continuous ingestion run | Blocked | Needs cTrader spot subscription. SPEC 8 says both venues, and only crypto is live |
+| Capital independence, SPEC 6.1 | Complete | Dynamic screen, property tests over eight orders of magnitude, structural guard against absolute amounts |
+| Sizing deliverable | Complete | Reported below. No forex class is eligible at 200 USD |
+| Round trip cost measurement | Complete | Reported below. Commission dominates; spread is near zero on a raw account |
+| Supervised ingest process | Complete | Supervisor reports on progress, not liveness |
+| **cTrader live quote subscription** | **Not started** | **The only thing blocking the 72 hour run** |
+| cTrader refresh token call | Not started | Credentials are modelled and expiry is on the interface; the HTTP refresh call is not written |
+| Reconnection with resynchronisation | Not started | Deliberately deferred: it belongs with the subscription state it must restore, and that state does not exist until the spot subscription does |
+| Weekday crypto rate capture | **Failed, not rerun** | Three attempts, all lost to the clock defect. No usable profile exists |
+| Crypto retention window | **Blocked** | Cannot be sized until a capture succeeds |
+| 72 hour continuous ingestion run | **Blocked** | Needs the cTrader spot subscription |
 
 ### Outstanding work, in the order it should be done
 
-1. ~~**Diagnose the CI failure.**~~ Done 2026-08-16. Race not regression, cause
-   unexplained, probe repaired. See the section above.
-2. **cTrader adapter.** Transport done 2026-08-16, see the section below.
-   Remaining: symbol metadata, meaning pip position, digits, minimum volume,
-   volume step, swap rates and the charging convention. Rotating refresh tokens
-   are modelled in configuration but the refresh call itself is not written yet.
-3. **Instrument registry from venue metadata**, then the sizing deliverable the
-   director asked for: minimum position size, tick value, and whether 1 percent
-   of a 200 USD account produces a viable size, for all six instruments. The
-   crypto half is already measured and is in this file. The forex half needs
-   the adapter above. Where 1 percent does not reach a viable size, the
-   instrument is excluded and the exclusion is reported; the machinery for that
-   decision exists in `src/tradingsys/risk/eligibility.py`.
-4. ~~**Resumable Dukascopy backfill.**~~ Done 2026-08-17. See the section below.
-5. **Weekday crypto rate**, then set crypto retention. The capture is scheduled;
-   see the section on it below.
-6. **72 hour continuous ingestion run.** Report to the director when the
-   adapters and the registry work, before starting it.
+1. **cTrader spot subscription.** `ProtoOASubscribeSpotsReq` (2127) and the spot event.
+   This unblocks the 72 hour run and is the only item that does.
+2. **Reconnection with resynchronisation**, built once against the subscription state it
+   has to restore rather than twice.
+3. **Re-run the weekday crypto capture** on the fixed script, then size crypto retention
+   and decide the snapshot repeat question with the row counts in hand.
+4. **72 hour continuous ingestion run.** Report to the director before starting it.
+5. The cTrader refresh token call, before any deployment that outlives the access token,
+   which expires about thirty days from issue.
 
 ### Where the phase 2 code lives
 
@@ -406,503 +353,120 @@ to be brought with evidence rather than resolved quietly.
 |---|---|
 | Gap detection | `src/tradingsys/marketdata/gaps.py`, with `TradingSchedule.open_intervals` in `src/tradingsys/core/schedule.py` |
 | Dukascopy reader | `src/tradingsys/marketdata/dukascopy.py` |
+| Backfill queue | `src/tradingsys/persistence/backfill.py` |
+| Backfill runner and HTTP fetcher | `src/tradingsys/marketdata/backfill.py` |
+| Backfill caller | `src/tradingsys/marketdata/backfill_job.py` |
 | Quote recorder | `src/tradingsys/marketdata/recorder.py` |
+| Instrument registry sync | `src/tradingsys/marketdata/registry.py` |
+| Supervision and ingest process | `src/tradingsys/app/supervisor.py`, `src/tradingsys/app/ingest.py` |
 | Bybit metadata, REST, stream | `src/tradingsys/venues/bybit/{instruments,rest,book,stream}.py` |
+| cTrader transport | `src/tradingsys/venues/ctrader/{framing,connection}.py` |
+| cTrader symbols and instruments | `src/tradingsys/venues/ctrader/{symbols,instruments,source}.py` |
+| cTrader historical tick data | `src/tradingsys/venues/ctrader/tickdata.py` |
+| Vendored cTrader protobuf schema | `src/tradingsys/venues/ctrader/messages/`, provenance in its `__init__.py` |
+| Eligibility screen and dynamic instrument screen | `src/tradingsys/risk/{eligibility,screen}.py` |
 | Shared request limiter | `src/tradingsys/venues/ratelimit.py` |
-| Eligibility screen | `src/tradingsys/risk/eligibility.py` |
-| Exact float32 conversion | `from_binary32` in `src/tradingsys/core/numeric.py` |
-| Recorded venue fixtures | `tests/venues/bybit/data/`, `tests/marketdata/data/` |
+| Exact float conversions | `from_binary32` and `decimal_from_double` in `src/tradingsys/core/numeric.py` |
 
-### Decisions taken during phase 2
+**Scripts that are measurements or controls, not part of the running system:**
 
-Moved to `docs/DECISIONS.md` on 2026-08-16, with their reasoning intact: linear
-perpetuals rather than spot, the BTC/USDT trading exclusion, the exclusion being
-a configuration threshold rather than a constant, recording both instruments
-regardless of the exclusion, USDT not being treated as USD, the `bybit`
-configuration key, unsigned commits, the CI trigger, and the verification probe
-ruling taken today.
-
-The measurement that produced the BTC exclusion stays here, because it is
-evidence rather than a ruling. From Bybit's own metadata on 2026-08-16, with BTC
-at 63,035 and ETH at 1,880 USDT:
-
-| Instrument | Quantity step | Notional per step | Risk per step at a 1 percent stop | Distinct sizes within a 2.00 USD budget | Widest stop affordable at minimum size |
-|---|---|---|---|---|---|
-| ETH/USDT perpetual | 0.01 ETH | 18.80 USDT | 0.188 USDT | 10 | 10.6 percent |
-| BTC/USDT perpetual | 0.001 BTC | 63.03 USDT | 0.630 USDT | 3 | 3.17 percent |
-
-With three usable sizes, the realised risk on a BTC trade can sit up to 31
-percent away from the 1 percent the risk engine claims to be enforcing.
-
-### The cTrader transport, and what connecting to the venue revealed
-
-**Status as of 2026-08-16T20:00Z: the transport is complete and verified against
-the real demo endpoint.** Rulings are in `docs/DECISIONS.md`; what is recorded
-here is the evidence and the defect that only a real connection could expose.
-
-| Concern | Module |
+| Script | What it does |
 |---|---|
-| Vendored schema and generated modules | `src/tradingsys/venues/ctrader/messages/`, provenance in its `__init__.py` |
-| Regeneration | `scripts/generate_ctrader_messages.sh`, verifies sha256 digests before generating |
-| Length prefixed framing and the envelope | `src/tradingsys/venues/ctrader/framing.py` |
-| TLS channel, handshake, heartbeat, death | `src/tradingsys/venues/ctrader/connection.py` |
-| Hand written venue peer for tests | `tests/venues/ctrader/scripted_venue.py` |
+| `scripts/verify.sh` | The only verification path. CI runs this same script |
+| `scripts/check_venue_assumptions.py` | The manual control for venue drift. Run before each phase closes and before any deployment |
+| `scripts/measure_forex_costs.py` | Spread by session and round trip cost as a fraction of risk |
+| `scripts/crosscheck_release_spread.py` | Whether an independent feed widens at a release |
+| `scripts/measure_crypto_rate.py` | The weekday crypto rate capture |
+| `scripts/arm_crypto_capture.sh` | Arms the capture against a wall clock instant |
+| `scripts/generate_ctrader_messages.sh` | Regenerates the vendored protobuf modules |
 
-**Observed against demo.ctraderapi.com on 2026-08-16**, not inferred:
+---
 
-| Observation | Value |
-|---|---|
-| Handshake | Application auth, account list, live flag assertion, account auth, all completed |
-| Account number 5325402 maps to ctidTraderAccountId | 48268952 |
-| `isLive` for that account | false, matching the practice configuration |
-| Venue heartbeat interval | 30.0s, arrivals at t+30.1, 60.1, 90.2, 120.2, 150.1 |
-| 150s idle on the shipped 95s deadline | still authenticated, no false death |
+### What the account can actually trade, and why
 
-**The defect that only connecting could find.** `stream_read_timeout_seconds` was
-20 seconds. The venue sends a heartbeat every 30. An idle forex socket carries
-nothing else, which is its normal state over a weekend, so the client would have
-declared every healthy idle connection dead and reconnected in a loop. No unit
-test could have caught it, because the scripted peer sends whatever the test tells
-it to. It is now 95 seconds, which is two missed venue heartbeats plus margin, and
-`tests/venues/ctrader/test_shipped_configuration.py` reads the shipped
-configuration and fails if the deadline is ever brought back under the interval
-the venue actually sends at.
+This is the most consequential finding of phase 2 and it is arithmetic rather than
+opinion. Decisions are in `docs/DECISIONS.md`; the numbers are here.
 
-This is the second time the same lesson has paid: anything asserted about the
-world outside the repository has to be observed happening at least once.
+**The quantisation tolerance is 5 percent, derived.** Position size rounds down to the
+venue grid, so the error is one directional and bounded by one step, and realised risk
+lies in `((1 - d) x r, r]`. Safety never binds because nothing exceeds the limit. What
+breaks is the truth of the statement: `SPEC.md` section 6 states the ceiling as 1.0
+percent, to one decimal place, which asserts [0.95, 1.05], so `d <= 0.05`. It replaced a
+10 percent figure that had been written without analysis, and it moved against
+convenience, which is the evidence it was derived.
 
-**The refusals are tested, and the tests were checked by breaking the code.** Two
-mutations were applied and each was caught by exactly one test: reading an absent
-`isLive` as demo, and logging a heartbeat write failure instead of dying. The
-first mutation logged `ctrader account authenticated ... environment=practice` for
-an account carrying no live flag at all, which is the fail-open the assertion
-exists to prevent.
+**No forex strategy class is eligible at 200 USD** on the current venue. Measured
+2026-08-17 on EUR/USD at 1.15692, 1 percent risk, 5 percent tolerance:
 
-**Not yet done in this adapter.** Symbol metadata, the refresh token call, and
-reconnection with resynchronisation. The connection currently reports death and
-stops; nothing reconnects it yet. That is deliberate, since reconnection policy
-belongs with the subscription state it has to restore.
+| Stop | Intended size | Verdict on a 1000 unit minimum |
+|---|---|---|
+| 5 pips | 4000 units | excluded, step is 25 percent of intended |
+| 20 pips | 1000 units | excluded, step is 100 percent of intended |
+| 50 pips | 400 units | excluded, below the minimum |
+| 80 pips | 250 units | excluded, below the minimum |
 
-### Venue drift cannot be caught by CI, and the control for it
+For the step to sit inside the tolerance the intended size must exceed 10,000 units,
+which needs a stop of 2 pips or tighter, which is inside the spread.
 
-**Decided by the director on 2026-08-16: no venue credentials in GitHub Actions.**
-The reasoning is in `docs/DECISIONS.md`. What matters operationally is the gap it
-leaves and the control that covers it.
-
-**The gap.** If Pepperstone changes a lot size, a swap convention, a symbol name,
-or the shape of its metadata, no pipeline in this repository will notice. Every
-test here runs against a peer we wrote or a fixture we recorded. CI proves the
-client is self consistent; it proves nothing about the venue.
-
-**The control.** `scripts/check_venue_assumptions.py`, run on the host where the
-credentials already live:
-
-```bash
-set -a && . ./.env && set +a
-uv run python scripts/check_venue_assumptions.py
-```
-
-It asserts rather than prints, and exits non zero on any failure. It covers the
-handshake, the live flag against the configured environment, the trader login to
-ctidTraderAccountId mapping still resolving, the venue heartbeat interval being
-within bounds of the 30 seconds the read deadline is sized against, the connection
-surviving an idle period on the shipped deadline, and the symbol metadata shape
-for every instrument in the universe.
-
-**It must be run before each phase closes and before any deployment.** That is the
-whole of the control. It is not automated and cannot be, so it belongs in the
-phase checklist rather than in a pipeline.
-
-First full run, 2026-08-16: **33 checks, 33 passed, 0 failed.**
-
-### The sizing deliverable
-
-Requested by the director. Measured 2026-08-16 against live venue metadata and
-live prices, using `evaluate_eligibility` from `src/tradingsys/risk/eligibility.py`
-rather than arithmetic repeated in the report.
-
-Account 200 USD, risk 1 percent, so a budget of **2.00 USD per trade**. The verdict
-column is at a 1 percent stop, the same figure the crypto leg was measured at.
-
-| Instrument | Price | Minimum size | Step | Tick | Tick value at minimum | Widest affordable stop | Verdict at a 1 percent stop |
-|---|---|---|---|---|---|---|---|
-| EUR/USD | 1.15692 | 1000 units | 1000 | 0.00001 | 0.01000 USD | 0.173 percent, 20.0 pips | **Excluded**, needs 172.87 units |
-| GBP/USD | 1.35334 | 1000 units | 1000 | 0.00001 | 0.01000 USD | 0.148 percent, 20.0 pips | **Excluded**, needs 147.78 units |
-| AUD/USD | 0.70837 | 1000 units | 1000 | 0.00001 | 0.01000 USD | 0.282 percent, 20.0 pips | **Excluded**, needs 282.34 units |
-| USD/JPY | 159.326 | 1000 units | 1000 | 0.001 | 1.000 JPY, 0.006276 USD | 0.200 percent, 31.9 pips | **Excluded**, needs 200.00 units |
-| ETH/USDT perpetual | 1880 | 0.01 ETH | 0.01 | n/a | n/a | 10.6 percent | **Tradeable**, 10 distinct sizes |
-
-**All four forex pairs are excluded at a 1 percent stop, and the reason is the same
-for each.** The minimum position is 1000 units on every pair, and 2.00 USD of risk
-spread over 1000 units is 0.002 USD per unit. For any USD quoted pair that is
-exactly **20 pips**, whatever the price. A stop wider than that needs a position
-smaller than the venue will accept, and `SPEC.md` section 6 says the answer is to
-exclude the instrument rather than raise the limit.
-
-USD/JPY works out at 0.3187 JPY, about 32 pips, because its risk is priced in JPY
-and converted at 159.326.
-
-**This is not the same finding as the BTC exclusion.** BTC was excluded for
-quantisation, meaning too few distinct sizes within the budget. These are excluded
-for the minimum itself: the smallest position the venue accepts already risks more
-than 2.00 USD at a 1 percent stop.
-
-**What it means, and what it does not.** It does not mean forex is untradeable on
-this account. It means any forex strategy here must use a stop at or inside 20 pips
-on a USD quoted pair, and inside about 32 pips on USD/JPY. That is a tight but not
-unreasonable intraday stop, and it is a strategy design constraint of the same
-kind as SPEC 5.5 imposes on the crypto leg. It is the director's call whether to
-accept that constraint, trade fewer pairs, or revisit at a larger account. Raising
-the risk limit to fit is forbidden by SPEC 6 and is not on the list.
-
-The exclusion re-evaluates on its own: it is arithmetic against live metadata and
-live price, so it changes when the account grows or the broker changes a minimum.
-
-### Capital independence, and the strategy class it rules out
-
-**Status as of 2026-08-16T21:30Z: complete.** `SPEC.md` gained section 6.1 and the
-phase 8 gate gained the paper capital rule, both by the director's direction. The
-rulings are in `docs/DECISIONS.md`; the finding is here.
-
-**The system now has no capital figure in it.** `InstrumentScreen` holds only
-fractions and is handed a balance each call, so the tradeable set is recomputed
-rather than cached, instruments enter and leave as the balance moves without a
-restart, and the transitions are reported rather than inferred. Property tests
-generate balances across eight orders of magnitude and assert the identities that
-define the arithmetic rather than a table of expected numbers. A structural test
-parses the risk package and rejects any constant that could be an amount of money.
-
-**The finding the director asked for, and it is not comfortable.** The stop ceiling
-at 200 USD, reported per instrument, against reference stop distances that are
-**declared assumptions pending the phase 4b measurement**:
-
-| Instrument | Stop ceiling | Viable | Blocked |
-|---|---|---|---|
-| EUR/USD | 20.0 pips | scalping, intraday trend | swing, macro event |
-| GBP/USD | 20.0 pips | scalping, intraday trend | swing, macro event |
-| AUD/USD | 20.0 pips | scalping, intraday trend | swing, macro event |
-| USD/JPY | 31.9 pips | scalping, intraday trend | swing, macro event |
-
-**Macro event trading is blocked on every forex pair at this capital**, and that
-finding produced the phase reorder recorded below. The tension is arithmetic rather
-than a matter of opinion: a 2.00 USD budget over a 1000 unit venue minimum is 20
-pips, whatever the strategy wants.
-
-The reference distances are assumptions and are labelled as such on every run of
-the check. Phase 4b measures what releases actually move, and at that point this
-becomes evidence rather than an estimate.
-
-**Resolved by the director on 2026-08-17: trend becomes phase 4a and macro events
-become 4b.** See the section below. Trading macro on the crypto leg to route around
-the ceiling was raised as an option and is now explicitly rejected; the reason is in
-`docs/DECISIONS.md` under rejected options, and it is not a capital reason.
-
-**The broker minimum lot investigation is unaffected and still stands.** A smaller
-venue minimum widens the viable strategy set at any capital, which is exactly what
-this table shows the binding constraint to be.
-
-### Phases 4a and 4b reordered: trend first, macro second
-
-**Directed by the director on 2026-08-17.** `SPEC.md` sections 5.1, 8, and the
-phase 8 gate were amended. The rationale for building macro first was preserved
-rather than replaced, because nothing about it has been shown wrong.
-
-**Why.** Two reasons, kept separate because only one can change. Readiness is the
-larger one: trend runs on data already being recorded and can be walk-forward
-tested as soon as the backtest engine exists, whereas macro needs a paid economic
-calendar API that has not been purchased and a surprise-to-direction mapping
-derived from history that has not been collected. Capital is the second: the
-20 pip stop ceiling measured above is inside an intraday trend stop and outside
-what a high importance release moves.
-
-**What reverses it.** A capital increase or a venue with a smaller minimum lot.
-The section 5.1 reasoning is what macro moves back up on, so it stays in place.
-Macro was shown unaffordable, not wrong, and those have different remedies.
-
-**The phase 8 gate now states what a fail on trend alone means.** A pass is a
-pass without qualification. A fail is a verdict on one leg, and the leg with the
-weaker theoretical basis, so it obliges making the macro leg reachable and
-evaluating it before the design is abandoned. This does not weaken the gate: every
-other criterion still binds and nothing is reinterpreted after the fact. It states
-in advance what an untested leg means, for the same reason the criteria are set
-before the paper period starts.
-
-**Rejected: trading macro on the crypto leg to route around the ceiling.** ETH has
-no scheduled release with a published consensus forecast, so the surprise term
-that makes a macro signal measurable does not exist there. The full reasoning is
-in `docs/DECISIONS.md` under rejected options, recorded so it is not revisited.
-
-**The broker minimum lot investigation matters more now, not less.** It is the
-cheapest route to unblocking macro: a smaller minimum widens the stop ceiling at
-unchanged capital. Still open, and it is reported when it is done.
-
-### The resumable Dukascopy backfill
-
-**Status as of 2026-08-17: complete.** Queue in `src/tradingsys/persistence/backfill.py`,
-runner and HTTP fetcher in `src/tradingsys/marketdata/backfill.py`.
-
-**An hour ends in exactly one of three states, and none of them is silence.** Complete
-with a row count, which may legitimately be zero for an hour the feed holds nothing
-for. Failed with the reason, claimable again by a later run. Or the process died
-holding it, in which case the claim goes stale and another run reclaims it. There is
-no path that leaves an hour neither done nor retryable, and none that marks an hour
-complete without having written what it found.
-
-**Zero rows is an answer, not a failure.** Every weekend hour is one. Recording it as
-complete is what lets the queue drain; recording it as failed would mean a backfill
-that never converges. The table constrains a complete row to carry a row count, so
-zero has to be stated rather than left null.
-
-**Concurrency is 3, and claiming is atomic.** `FOR UPDATE SKIP LOCKED` means two
-workers cannot take the same hour, proven by an integration test that fires two claims
-concurrently and asserts no hour appears twice. Without it the three workers would
-spend the feed's tolerance fetching the same hours.
-
-**A corrupt payload is not retried.** The reader refuses an HTML error page rather than
-decoding it as an empty hour, and refuses a truncated archive. Neither becomes valid by
-asking again in a second, and retrying would turn a clear signal about the feed into a
-slow one. Transport failures are retried with exponential backoff and full jitter, the
-jitter being what stops three workers retrying in lockstep after a shared failure.
-
-**404 and 200 are the only answers the fetcher accepts.** 404 is an hour the feed holds
-nothing for. Anything else raises and is retried, because the one thing the fetcher must
-never do is return empty bytes for a request that did not succeed: that records a hole
-in history that never existed.
-
-Coverage: 22 unit tests against a scripted feed and queue for the runner's handling of
-the state machine, and 17 integration tests against real PostgreSQL for the state
-machine itself, including the atomic claim, the stale claim recovery, and the
-constraints that refuse a complete row with no row count or a failed row with no reason.
-
-**The caller now exists.** `BackfillJob` in `src/tradingsys/marketdata/backfill_job.py`
-works out which hours are missing during hours the venue was open, queues them, and
-drains the queue. It takes the schedule from the instrument itself, so a broker that
-changes its session hours changes what gets queued on the next registry sync rather
-than on a code change. A partly open hour is queued, because it still holds ticks and
-skipping one would leave a real hole at every session boundary.
-
-**Still not scheduled.** Nothing calls `BackfillJob` on a timer yet, and per the defect
-class recorded in `docs/DECISIONS.md` that scheduling has to verify it fires on wall
-clock time rather than assume a live process implies a live schedule.
-
-### The quantisation tolerance, derived, and what it does to the broker question
-
-**Directed by the director on 2026-08-17.** The 10 percent figure was written into a
-prompt without analysis when BTC was excluded and had become load-bearing. It is now
-derived, and the derivation is in `docs/DECISIONS.md`.
-
-**The answer is 5 percent.** Rounding to the venue grid is one directional, since size
-rounds down, and bounded by one step, so realised risk lies in `((1 - d) x r, r]`.
-Safety never binds, because nothing exceeds `r`. What breaks is the truth of the
-statement: `SPEC.md` section 6 states the limit as 1.0 percent, to one decimal place,
-which asserts [0.95, 1.05], and requiring the lower end to stay inside that gives
-`d <= 0.05`.
-
-It moved **against** convenience. 5 percent is tighter than 10, so it excludes more at
-this capital, which is the test that it was derived rather than fitted.
-
-### What each strategy class costs in capital
-
-Now in `SPEC.md` section 6.2 as a specification finding. Computed with the shipped
-eligibility screen and checked at the boundary: eligible at the stated balance,
-excluded one percent below it.
+**What each class costs in capital**, now `SPEC.md` section 6.2. Each figure checked at
+its boundary: eligible at the stated balance, excluded one percent below it.
 
 | Venue minimum and step | Scalp 5p | Intraday 20p | Swing 50p | Macro 80p |
 |---|---|---|---|---|
-| 1000 units, 0.01 lot, Pepperstone today | 1,000 USD | 4,000 USD | 10,000 USD | 16,000 USD |
-| 100 units, 0.001 lot, "nano" | 100 USD | 400 USD | 1,000 USD | 1,600 USD |
-| 10 units, 0.0001 lot, cent account | 10 USD | 40 USD | 100 USD | 160 USD |
+| 1000 units, 0.01 lot, today | 1,000 USD | 4,000 USD | 10,000 USD | 16,000 USD |
+| 100 units, 0.001 lot | 100 USD | 400 USD | 1,000 USD | 1,600 USD |
+| 10 units, 0.0001 lot | 10 USD | 40 USD | 100 USD | 160 USD |
 
-The relationship is `balance = step x stop_in_pips x 0.2` for a USD quoted pair, so
-the three levers are a smaller step, a tighter stop, or more capital.
+`balance = step x stop_in_pips x 0.2` for a USD quoted pair. The levers are a smaller
+step, a tighter stop, or more capital. Raising either limit is not among them.
 
-### Round-trip cost, measured on the Pepperstone demo
+**Round trip cost, measured 2026-08-17 from the venue's own tick data and its own
+published commission**, for Friday 2026-08-14. Spread is near zero because this is a raw
+spread account: EUR/USD median 0.000 pips across every session, GBP/USD and USD/JPY
+0.100, widening to 0.2 or 0.3 in the late New York hour. The cost is commission, at 3.00
+USD per standard lot per side from `preciseTradingCommissionRate`.
 
-**Measured 2026-08-17 for Friday 2026-08-14**, from the venue's own historical tick
-data and its own published commission. No advertised figure is used. Dukascopy was not
-substituted: it is a different venue and `core/provenance.py` marks it research only,
-so its spreads answer a question about a book these orders would not cross.
-
-**Spread is almost nothing on this account, because it is a raw spread account.**
-EUR/USD median 0.000 pips across every session; GBP/USD and USD/JPY median 0.100. The
-widest session is the late New York hour, at 0.200 to 0.300. Maxima reach 0.6 to 0.9
-pips at session opens. The cost is not in the spread.
-
-**Commission is the cost, and it is 3.00 USD per standard lot per side**, read from
-`preciseTradingCommissionRate` in the symbol metadata rather than a rate card. That is
-0.06 USD round trip on the 1000 unit minimum.
-
-**Cost as a fraction of risk taken, which is the number that decides viability:**
-
-| Stop | EUR/USD median | EUR/USD p95 | GBP/USD median | USD/JPY median |
+| Stop | EUR/USD median | EUR/USD p95 | GBP/USD | USD/JPY |
 |---|---|---|---|---|
-| 5 pips | **12.0 percent** | 16.0 percent | 14.0 percent | **21.1 percent** |
+| 5 pips | 12.0 percent | 16.0 percent | 14.0 percent | 21.1 percent |
 | 10 pips | 6.0 percent | 8.0 percent | 7.0 percent | 10.5 percent |
 | 20 pips | 3.0 percent | 4.0 percent | 3.5 percent | 5.3 percent |
 
-**The ratio is independent of position size and capital.** Spread cost, commission and
-risk all scale linearly with units, so the ratio cancels exactly: 12 percent at a 5
-pip stop whether the position is 10 units or 100,000. Verified across four orders of
-magnitude. This matters because it means the cost question is answered once, for every
-account size, and only the sizing question depends on capital.
+**Cost as a fraction of risk is exactly independent of position size and capital**,
+verified across four orders of magnitude, because spread, commission and risk all scale
+linearly with units and the ratio cancels. So cost depends only on stop distance and
+sizing depends only on capital and venue step: **the two constraints are orthogonal**.
+Scalping at 5 pips is not viable on this venue; 20 pip stops cost 3.0 to 5.3 percent,
+which is in the range this project already accepts for funding.
 
-**Scalping at a 5 pip stop is not viable on this venue.** Twelve percent of the risk
-budget consumed per round trip on the cheapest pair, sixteen at the 95th percentile,
-twenty one on USD/JPY. A strategy would need a gross edge above 0.12R to 0.25R per
-trade merely to break even. For scale, `SPEC.md` section 5.5 treats funding at 3
-percent of 1R over seven days as approaching material; this is that cost four times
-over, instantly, on every trade.
+**Slippage is excluded from every figure above and is unmeasured.** It exists only in
+fills, so it is phase 6 or 7 data by construction. At a 20 pip stop one pip of it is 5
+percent of risk, comparable to the entire commission cost. Phase 3 states it as an
+explicit unmeasured term rather than omitting it, because an omitted term reads as zero.
 
-**Slippage is not in these figures** and would make them worse. Measuring it needs
-fill data, which does not exist until execution and paper trading. At a 5 pip stop one
-pip of slippage would add twenty percentage points, which is why the conclusion there
-is robust; at 20 pips it would add five, which is tolerable but not free.
+### The broker search, and why it is over
 
-### The spread figures are a lower bound, and the NFP test says why
+**Conclusion, reached 2026-08-18: there is no cTrader route to a small enough minimum,
+and forex at 200 USD needs either more capital or a second venue adapter.** Do not open
+further demo accounts to confirm this.
 
-**Tested 2026-08-17 against the 2026-08-07 13:30 UTC non-farm payrolls release**, at the
-director's challenge that a median of 0.000 pips through NFP would not be believable.
+**RoboForex is out.** Its account opening form offers MetaTrader 4, MetaTrader 5 and R
+StocksTrader. There is no cTrader on any account type. Several broker comparison sites
+listed it as a cTrader broker and they were simply wrong. The rule that follows is in
+`docs/DECISIONS.md`: **platform availability comes from the broker's own account opening
+form**, never from a ranking site, and not from broker marketing either, because those
+list platforms per broker while availability is per account type, and a cent account is
+the type most likely to be excluded.
 
-| EUR/USD window | ticks | median | p95 | max |
-|---|---|---|---|---|
-| quiet, 12:00 +30m | 1808 | 0.000 | 0.200 | 1.100 |
-| pre release, 13:25 +5m | 402 | 0.000 | 0.200 | 0.300 |
-| release minute, 13:30 +1m | 105 | 0.000 | 0.100 | 0.300 |
-| 13:31 +4m | 381 | 0.000 | 0.000 | 0.100 |
-| 13:35 +25m | 2163 | 0.000 | 0.100 | 0.500 |
+**Two of the three search filters turned out to be useless.** Spotware states the Open
+API "is supported by all trading accounts of any cTrader-affiliated brokers", so
+requiring it narrows nothing. And `minVolume` is per symbol broker configuration
+published only over the API, so no directory can be filtered on it.
 
-**The median does stay at 0.000 through the release.** The method was checked before the
-data was blamed. The way exact timestamp pairing could lie is by discarding fast
-moments, leaving a sample biased toward calm; measured, pairing coverage is 92.1 percent
-in the quiet window, 92.9 percent in the release minute and 95.9 percent over the five
-minutes after, so it does not collapse and the sample is not selected for calm.
+**So it was answered from data.** Every symbol on the Pepperstone catalogue was fetched,
+all 1939, and the minimums examined:
 
-**So the explanation is the account, not the arithmetic.** This is a demo, and a demo
-feed is not obliged to reproduce live pricing. The figures are treated as a **lower
-bound on live spread** and phase 3 must not rest its cost model on them.
-
-The direction of the error is known and it does not overturn anything: real spreads can
-only be wider, so scalping is at least as dead as measured and the 3 percent at a 20 pip
-stop can only rise. The next step that does not need a live account is to check whether
-Dukascopy, a different feed, widens at NFP where this one does not. That answers whether
-zero widening is plausible at all without letting a research-only number into an
-execution cost model.
-
-### The Dukascopy cross-check: the demo feed is not the problem
-
-**Run 2026-08-17.** `scripts/crosscheck_release_spread.py`. Dukascopy is research only,
-so nothing here is a cost estimate for Pepperstone; the question was narrower, and was
-whether any real feed widens at a release.
-
-EUR/USD, 2026-08-07, spreads in pips:
-
-| Window | ticks | median | mean | p95 | max |
-|---|---|---|---|---|---|
-| quiet hour 11:00 | 1508 | 0.300 | 0.273 | 0.500 | 0.600 |
-| 13:30 minus 1 min | 76 | 0.200 | 0.228 | 0.400 | 0.400 |
-| **release minute 13:30** | 113 | **0.200** | 0.265 | 0.500 | 0.500 |
-| 13:30 plus 1 min | 94 | 0.300 | 0.277 | 0.500 | 0.500 |
-| 13:30 plus 15 min | 85 | 0.200 | 0.233 | 0.400 | 0.500 |
-
-**No widening at all**, on a second and independent feed. Every release window sits at
-0.7 to 1.0 times the quiet median, and the widest single tick in the release minute is
-narrower than the widest in the quiet hour. Tick rate rises about fourfold, from roughly
-25 per minute to 113: activity spikes and quoted spread does not.
-
-**So my hypothesis was wrong and is withdrawn.** The demo feed is not shown to be
-unrepresentative on spread. The magnitude the director asked for turns out to be a
-factor of about 1.0, and that is the finding.
-
-**What survives is a better argument.** Quote data cannot measure execution cost at all.
-What degrades at a release is the size executable at the quoted price, so the cost shows
-up in slippage and rejection rather than in the quote. A book can hold a 0.2 pip spread
-while the volume behind it collapses, and no amount of quote data from any feed reveals
-that. The optimistic bias at the phase 8 gate is therefore real, but its mechanism is
-the unmeasured slippage term rather than an understated spread. `SPEC.md`'s phase 8 entry
-was written on the withdrawn reason and has been corrected to the surviving one.
-
-**Two incidental confirmations.** The Dukascopy fetcher refused an HTTP 429 rather than
-recording it as an empty hour, which is exactly the distinction it was built to make: a
-rate limit answered as "no data for this hour" would have written a false hole into the
-backfill queue. And Dukascopy's records carry bid and ask together, so this measurement
-needed none of the pairing reconstruction the cTrader side required.
-
-### Slippage, and what it would take to measure
-
-Not in the cost figures, and stated rather than omitted. It exists only in fills, and
-this system has never submitted an order, so it is phase 6 or phase 7 data by
-construction: recorded fills carrying the quote at submission, the fill price, order
-type, size and instant, so slippage can be separated from spread and attributed to
-conditions.
-
-At a 20 pip stop one pip of slippage is 5 percent of risk, comparable to the entire
-commission cost, so it is the same order of magnitude as a term that is measured. Phase
-3's cost model states it as an explicit unmeasured term: an omitted term reads as zero,
-and zero is the one value it certainly does not have.
-
-### Reading the account balance, and why a cent account needs it
-
-`scripts/check_venue_assumptions.py` now reports the balance the venue states, converted
-by the venue's own `moneyDigits` exponent, plus the deposit asset. Verified against the
-Pepperstone demo: **balance 200 USD, moneyDigits 2**, which matches the funded amount, so
-the conversion is right on an account whose answer is already known.
-
-This exists for the ProCent test. A cent account may denominate equity differently, and
-feeding the sizing screen a number that means something other than what it thinks would
-size every position wrongly by a constant factor while looking entirely plausible. The
-venue publishes the exponent rather than leaving it to be inferred, and the script now
-asserts that it is present, that the balance is positive, and that the deposit asset is
-the currency the risk policy assumes. If ProCent reports something other than USD or a
-balance a hundred times the deposit, the script fails rather than proceeding.
-
-### What the cost measurement changes about the broker question
-
-**It does not close it. It sharpens it, and moves the target.**
-
-The two constraints are orthogonal, which was not obvious before measuring. Cost
-depends only on stop distance. Sizing eligibility depends only on capital and the
-venue's step. So they resolve independently:
-
-- **Cost rules out stops tighter than about 20 pips.** 5 pips costs 12 to 21 percent
-  of risk and 20 pips costs 3.0 to 5.3, which is in the range this project already
-  accepts for funding.
-- **Sizing then asks what capital a 20 pip stop needs**, which is
-  `step x 20 x 0.2`: 4,000 USD on a 1000 unit step, 400 USD on a 100 unit step, and
-  **40 USD on a 10 unit cent account step**.
-
-**So the class to aim at is 20 pip intraday, not 5 pip scalping, and the required step
-is 50 units or smaller rather than 200.** That is still cent account territory, and it
-still points at RoboForex ProCent first, but for a different reason and against a
-different number than before the measurement.
-
-At 200 USD on a 10 unit step, a 20 pip stop buys 1000 units with 1 percent
-quantisation error against the derived 5 percent tolerance, and costs 3 percent of
-risk. That combination works. Nothing on a 1000 unit step works at this capital at any
-stop distance.
-
-### The cTrader broker search, done from the platform rather than from rankings
-
-**2026-08-18. RoboForex is out**: its account opening form offers MetaTrader 4,
-MetaTrader 5 and R StocksTrader, and no cTrader on any account type. The comparison
-sites listing it as a cTrader broker were wrong. The rule that follows is in
-`docs/DECISIONS.md`: platform availability comes from the account opening form, never
-from a site that ranks brokers, and never from broker marketing either, because those
-list platforms per broker while availability is per account type.
-
-**One of the three filters turns out to be vacuous.** Spotware's own help centre states
-that the Open API "is supported by all trading accounts of any cTrader-affiliated
-brokers" by default. So requiring Open API access narrows nothing: every cTrader broker
-has it.
-
-**The decisive filter cannot be applied from any list.** `minVolume` is per-symbol broker
-configuration published only over the API, so no directory, however authoritative, can
-be filtered on it. That is the same wall as before and no amount of better sourcing moves
-it.
-
-**So the question was answered from data instead.** Every symbol on the Pepperstone
-catalogue was fetched, all 1939, and the minimum volumes examined:
-
-| Minimum, in units | Symbols |
+| Minimum, units | Symbols |
 |---|---|
 | 0.01 | 13 |
 | 0.1 | 964 |
@@ -911,366 +475,89 @@ catalogue was fetched, all 1939, and the minimum volumes examined:
 | 1000 | 115 |
 | above 1000 | 17 |
 
-**The platform permits small minimums and this broker uses them**, just not on currency
-pairs. The 0.01 and 0.1 minimums are indices, metals and crypto CFDs, where a unit is a
-contract rather than a unit of base currency, so they are not comparable to FX sizing.
-Filtering to instruments whose base and quote are both currencies gives 90 pairs, and
-**every one of them is minVolume 1000, step 1000. Uniformly, without exception.**
+The platform clearly permits small minimums and this broker uses them, but not on
+currency pairs: the 0.01 and 0.1 entries are indices, metals and crypto CFDs, where a
+unit is a contract rather than a unit of base currency and the figure is not comparable
+to FX sizing. **Filtering to instruments whose base and quote are both currencies gives
+90 pairs, and every one is minVolume 1000, step 1000, without exception.**
 
-That is the useful finding. The 1000 unit floor is not a cTrader platform limit, since
-the same broker configures 0.01 on other instruments, and it is not a per-symbol quirk
-either. It is a uniform FX policy, and 0.01 lots is the universal retail FX convention
-across every platform.
+So the 1000 unit floor is not a cTrader platform limit, since the same broker configures
+0.01 elsewhere, and it is not a per symbol quirk. It is a uniform FX policy, and 0.01
+lots is the universal retail FX convention. **Sub-0.01-lot FX comes from cent accounts,
+and cent accounts are an MT4 and MT5 construct**, which is consistent with RoboForex
+running its cent accounts there and offering no cTrader at all.
 
-**Where sub-0.01 lot FX actually comes from is cent accounts, and those are an MT4 and
-MT5 construct.** That is consistent with everything observed: RoboForex, the best known
-cent account broker, runs its cent accounts on MT4 and MT5 and offers no cTrader at all.
+**The three ways forward, none taken:**
 
-**The conclusion, stated plainly rather than tested candidate by candidate.** There is
-no evidence that any cTrader broker configures FX below 1000 units, and a structural
-reason to expect none does. Forex at 200 USD therefore needs **either more capital or a
-second venue adapter**. Continuing to open demo accounts would be testing candidates to
-confirm a conclusion the data already supports.
-
-### The three ways forward on forex, none of them taken here
-
-| Option | What it costs | What it buys |
+| Option | Cost | Buys |
 |---|---|---|
-| **More capital** | 4,000 USD for 20 pip intraday on a 1000 unit step, 20 times the current account | Forex on the venue already built, with no new code |
-| **A second venue adapter** | FXOpen Micro has the arithmetic at a 10 unit effective step and needs 40 USD, but speaks MT4, MT5 and TickTrader rather than cTrader. A whole adapter, plus its share of phase 6 execution work | Forex at current capital |
-| **Crypto only for now** | Nothing. ETH/USDT perpetual already clears at 200 USD | Defers the decision until capital or evidence changes, and the system is capital independent by design so forex enters on its own when the balance supports it |
+| More capital | 4,000 USD for 20 pip intraday, twenty times the current account | Forex on the venue already built, no new code |
+| A second venue adapter | FXOpen Micro has the arithmetic at a 10 unit effective step and needs 40 USD, but speaks MT4, MT5 and TickTrader. A whole adapter plus its share of phase 6 | Forex at current capital |
+| Crypto only for now | Nothing. ETH/USDT perpetual already clears at 200 USD | Defers the decision; the system is capital independent so forex enters on its own when the balance supports it |
 
 The second is real work and is the director's decision to take deliberately rather than
-to drift into. It is noted here so that it is taken rather than assumed.
-
-### Which brokers are worth testing, and what each would need to publish
-
-At 200 USD, the step a broker must publish to clear each class:
-
-| Class | Required step | In lots |
-|---|---|---|
-| Scalp, 5 pips | 200 units | 0.002 |
-| Intraday, 20 pips | 50 units | 0.0005 |
-| Swing, 50 pips | 20 units | 0.0002 |
-| Macro, 80 pips | 12.5 units | 0.000125 |
-
-**Nothing in the standard retail lot ladder clears more than scalping at 200 USD.**
-The ladder is 0.01 lots, which is 1000 units and clears nothing, and 0.001 lots, which
-is 100 units and clears scalping only, since intraday needs 50. There is no 0.0005 lot
-tier in ordinary accounts.
-
-**Only a cent account reaches the rest.** A cent account redefines one lot as 1000
-units instead of 100,000, so its 0.01 minimum is 10 units of base currency, which
-clears every class down to 160 USD for macro. That is a different mechanism from a
-smaller nano lot and it is the only configuration that works at this capital.
-
-**The list, in the order worth testing:**
-
-| Broker and account | Why | What settles it |
-|---|---|---|
-| RoboForex ProCent | The only candidate that plausibly combines a cent account with cTrader, so the existing adapter is reused. Regulated in Belize, which is a risk question for the director rather than a technical one | Whether cTrader is offered **on ProCent specifically**. Platform availability is often per account type, and marketing pages list platforms per broker |
-| IC Markets cTrader Raw | Accepts Kenyan clients, better regulated, already speaks our protocol | Expected to publish 1000 units and therefore to clear nothing. Worth one script run to confirm the ladder rather than to discover a surprise |
-| FXOpen Micro Cent | 10 unit step, so the arithmetic works | Lists MT4, MT5, and TickTrader, not cTrader. Only worth pursuing if RoboForex fails and a second adapter is acceptable |
-
-**A caveat on the one class that does clear.** Scalping at a 5 pip stop is eligible by
-the sizing screen at 100 unit steps, and that is a statement about sizing only. A 5
-pip stop leaves round trip spread and commission as a large fraction of the risk
-taken, and none of that has been measured on this account. Eligible is not the same as
-economically viable, and the cost side needs measuring before anyone relies on the
-first column of these tables.
-
-**None of this is settled by reading.** Broker comparison pages are marketing, they
-disagree with each other, and one contradicted itself on whether a broker offers
-cTrader at all. The number that decides it is `minVolume` from the venue's own API,
-which `scripts/check_venue_assumptions.py` already reads. Open the demo, point the
-script at it, read the number.
-
-### The supervised ingest process
-
-**Complete 2026-08-17.** `src/tradingsys/app/supervisor.py` and
-`src/tradingsys/app/ingest.py`.
-
-**The supervisor reports on progress, not on liveness**, which is the defect class from
-`docs/DECISIONS.md` made executable. Every activity declares how long it may go without
-making progress; the work itself reports progress, because only the work knows what
-progress means; and an activity past its deadline is unhealthy **even though its task is
-alive and its failure count is zero**. `ProgressCheck` puts that on readiness rather than
-liveness, since a stalled venue is not a reason to restart a healthy process.
-
-The two behaviours worth stating:
-
-**A clean return is not completion.** A stream that ends has stopped ingesting, so
-returning restarts the activity exactly as raising does. Treating a return as success is
-how ingestion stops silently on a process that stays up.
-
-**Backoff resets on progress.** An activity that worked before failing starts its next
-backoff from the base delay, so one bad hour does not leave the retry interval pinned at
-its ceiling for the rest of a 72 hour run.
-
-Both were verified by mutation. Reporting liveness instead of progress breaks three
-tests; treating a clean return as completion breaks one. Time is driven by an injected
-clock, so a nine hour stall is asserted in microseconds and the test measures the
-behaviour rather than the machine's timer.
-
-**What it runs:** registry sync on an interval, so a broker changing a minimum lot
-mid-run is noticed during the run rather than at the next restart; the crypto quote
-stream into the tick recorder; and the periodic Dukascopy backfill over the hours the gap
-detector finds missing.
-
-**What blocks the 72 hour run, stated rather than hidden.** There is no live forex quote
-stream. cTrader spot subscription is a protocol path this client does not speak yet, so
-the forex leg contributes history through the backfill and nothing live. `SPEC.md`
-section 8 requires continuous ingestion for both venues, so the run cannot be claimed
-until that exists. That is the next build.
-
-### Not a decision yet: unchanged snapshot repeats become tick rows
-
-**Open. Waiting on the measured row counts, and then on the director.**
-
-Every venue message currently becomes a tick row, including unchanged repeats.
-This is the present behaviour rather than a decision, and it needs one. Bybit
-documents that a level 1 topic repeats its snapshot with the *same* `u` when
-nothing has changed for three seconds, and `BookState.apply` emits a quote for
-each such message. Storage deduplicates on instrument, source, and timestamp, and
-a repeat carries a new timestamp, so it lands as a new row: up to 28,800 rows per
-instrument per day carrying no information during a quiet market.
-
-The detection rule is exact and needs no heuristic, since an unchanged repeat
-reuses the update id. Suppressing them is not done yet because it interacts with
-the retention question that the weekday capture is meant to settle, and because
-the argument for keeping them is not empty: a row per three seconds is also
-evidence the feed was alive. That evidence already exists in the ping, the receive
-deadline, and the recorder counters, so the likely answer is to suppress and rely
-on those, but it is the director's call and it should be taken with the measured
-row counts in hand rather than before them.
-
-### Defects found this session, with their diagnoses
-
-Recorded because the diagnosis is worth more than the fix. Three were found by
-writing tests, and the fourth by pushing to a remote for the first time.
-
-**1. The rate limiter livelocked, inside a lock.** The first implementation of
-`RateLimiter.acquire` computed how many tokens were missing, slept for exactly
-that long, then re-measured the clock and checked again. The refill is
-`(now - updated) * rate` in binary floating point, so the recomputed balance
-can land a fraction of an ulp below the requested cost. The next wait is then
-a few nanoseconds, and the one after that smaller still, until the delay is too
-small to change the clock at all and the loop spins forever holding the
-`asyncio.Lock`. Two tests written before the fix did not fail, they hung, which
-is why this is worth remembering: a livelock does not report itself. The fix is
-to reserve the tokens against the instant they will exist rather than
-re-measuring, which makes progress arithmetic rather than hopeful and keeps the
-sustained rate exact. `TestProgressUnderFloatingPointRefill` in
-`tests/venues/test_ratelimit.py` covers rates whose intervals are not
-representable in binary.
-
-**2. The stream's reconnect catch tuple omitted the only exception that
-matters.** It caught `(VenueConnectivityError, VenueResponseError, OSError,
-TimeoutError)`, which reads as careful and comprehensive. The `websockets`
-library signals a dropped connection with its own exception type, which does
-not inherit from `OSError`, so the recorder would have exited on the first
-disconnection rather than reconnecting, on a market that never closes and has
-no historical quote source to backfill from. Found because the test socket
-raises a custom exception rather than a real one, which is the case a
-handwritten scripted double covers and a mock of the real library would have
-hidden. It now catches `Exception`, counts it, and keeps the type and message
-in `StreamStats.last_error`. `CancelledError` is a `BaseException` and still
-propagates, so shutdown is unaffected.
-
-**3. A nanosecond epoch divided in a float.** `BybitRestClient.server_time`
-computed `nanoseconds / 1_000_000_000` as a float. A double has 53 bits of
-mantissa and a nanosecond epoch needs about 61, so the low digits were being
-discarded silently and the value was wrong by a variable sub-microsecond
-amount. Now integer `divmod`, with the remainder truncated to microseconds
-rather than rounded, so the recorded instant never lands after the instant the
-venue reported. The same class of error is why prices are parsed from the
-venue's decimal strings and never from JSON numbers.
-
-**4. CI existed and had never run once.** The worst of the four, because it was
-counted as coverage. The workflow triggered on pushes to `main`, and `main` is
-still the phase 1 commit, which has no `.github/` directory at all: the
-workflow file was added later, on the phase branch. So a push to the branch
-where the work happens matched no trigger, and a push to `main` would have
-found no workflow to run. From phase 1 until the remote existed, every claim
-about CI enforcing anything was untrue, and nothing revealed that, because a
-pipeline that never runs produces no red. The filter was wrong in principle
-too: phase branches live for days, so a check that fires only at merge time
-reports on work finished a week earlier. The trigger is now every branch, and
-GitHub reads the workflow from the branch being pushed, so each branch is
-checked against its own pipeline. Verified by observing an actual run complete,
-not by reading the YAML.
-
-The lesson worth carrying: the first three were found by tests that exercised
-the real failure shape, and the fourth was invisible to every test in the
-repository because it was a fact about the world outside it. Anything asserted
-about infrastructure needs to be observed happening at least once.
-
-### Funding drag on a 200 USD account
-
-Requested by the director on 2026-08-16. Measured from Bybit's own funding
-history, `GET /v5/market/funding/history`, 600 settlements per instrument
-covering 199.7 days to 2026-08-16.
-
-| ETH/USDT perpetual, funding rate per 8 hours | Value |
-|---|---|
-| Mean, signed | 0.001442 percent |
-| Mean, absolute | 0.004299 percent |
-| Median | 0.001885 percent |
-| 95th percentile | 0.009828 percent |
-| Worst observed, absolute | 0.020824 percent |
-| Settlements where a long pays | 387 of 600 |
-
-**The result does not depend on account size.** Funding is charged on notional
-and risk is notional times the stop distance, so
-
-```
-funding cost as a fraction of one R  =  funding rate / stop distance
-```
-
-The 200 USD account cancels out. What the figure is sensitive to is the stop
-distance, because a tighter stop buys more notional per unit of risk, and a
-0.5 percent stop therefore doubles the drag of a 1 percent one.
-
-At a 1 percent stop, with one R being the 2.00 USD per-trade risk budget:
-
-| Holding period | Mean rates | 95th percentile rates |
-|---|---|---|
-| 1 day | 0.43 percent of 1R | 2.95 percent of 1R |
-| 3 days | 1.30 percent of 1R | 8.85 percent of 1R |
-| 7 days | 3.03 percent of 1R | 20.6 percent of 1R |
-| 14 days | 6.06 percent of 1R | 41.3 percent of 1R |
-
-In cash, the position a 200 USD account takes at 1 percent risk and a 1 percent
-stop is 0.10 ETH, 188.01 USDT of notional, and funding on it costs 0.008 USDT
-per day at mean rates and 0.055 USDT per day at the 95th percentile.
-
-**Conclusion.** Funding is not a material cost for intraday or overnight
-holding at this size: a day costs under half a percent of the trade's risk
-budget at mean rates. It becomes material somewhere past a week. Against a
-hypothetical expectancy of 0.20R per trade, a three day hold costs about 6
-percent of the expected profit at mean rates and about 44 percent at 95th
-percentile rates, and a seven day hold at 95th percentile rates costs the whole
-of it. The 0.20R figure is an assumption for scale only, since no strategy
-exists yet to measure; the percentages of 1R above are the measured part.
-
-The recommendation that follows is not a change to the plan: hold periods
-beyond roughly five days need funding modelled per position in the cost model
-rather than treated as a constant, and the phase 4 backtester must charge
-funding on the actual settlement schedule. The funding anchor is already read
-from the venue for exactly that reason.
-
-### The repository has a remote
-
-`https://github.com/alexhaya4/tradingsys`, private, created 2026-08-16. Both
-branches pushed: `main` at the phase 1 commit, `phase-2-market-data` carrying
-everything since. Verified through the API rather than assumed from the create
-command: `private: true`, `visibility: private`, both remote branch heads equal
-to the local ones, and `.env` returning 404 on the contents endpoint.
-
-**History was scanned before the first push, not after.** The repository was
-initialised after `.env` already existed, so absence had to be checked rather
-than assumed. Every value in `.env` was searched for across every blob in every
-commit and across every commit message, plus patterns for GitHub tokens, AWS
-keys, Slack tokens, and PEM private key headers. Result: no credential value
-appears anywhere in the history.
-
-One thing did turn up and is recorded rather than buried. The Pepperstone demo
-account number appears in `SPEC.md`, where the director put it deliberately,
-and appeared in two config test fixtures, which now use a placeholder of the
-same shape. It is an identifier rather than a credential: nothing authenticates
-with it, the configuration model classifies `account_id` as non-secret, and the
-account is a demo. The push went ahead on that basis. The historical commits
-still contain it in the test files, which is only worth rewriting if this
-repository ever stops being private.
-
-### CI now runs, and is green
-
-**As of 2026-08-16T17:45Z.** The workflow had never executed once before the
-previous session. That is recorded as defect 4 above, with its diagnosis, because
-a check counted as coverage that has never run is worse than no check.
-
-It runs on every branch now. Three runs existed at the previous capture, not two,
-and the third had already turned CI green before that capture was read:
-
-| Run | Commit | Result |
-|---|---|---|
-| 31939273660 | `e01e36d` | success |
-| 31939779488 | `aa3e501` | failure on the metrics probe, since diagnosed |
-| 31941861860 | `7a3617a` | success |
-
-The failure was classified as a race and its probe repaired. See the diagnosis
-section at the top of this phase.
-
-**The phase branch is not merged into `main`, and merging it is not a way to make
-CI fire.** Phase branches merge when the phase completes and its exit criteria are
-met, not to satisfy tooling. `main` therefore stays at the phase 1 commit until
-phase 2 is done and accepted.
-
-### Open items carried into the rest of phase 2
-
-| Item | Why it matters |
-|---|---|
-| Dukascopy volume units | The feed does not document them. To be confirmed against a published definition, or cross checked against Pepperstone over an overlapping window with the ratio reported |
-| Weekday crypto tick rate | Capture scheduled, see below. Crypto retention is not set until it lands. A sampling scheme, if one turns out to be warranted, comes with its statistical justification rather than just a rate |
-| Unchanged snapshot repeats stored as rows | Described in its own section above. Decide with the measured row counts in hand, not before |
-| `/health` asserts no internal invariant | Intended, but the director asked whether it should stay that way. Still open; see the section on it above |
-
-### The weekday crypto capture, armed for the third time
-
-`scripts/measure_crypto_rate.py` counts top of book updates and trades per UTC hour
-rather than reporting a single mean, because a busy hour extrapolated to a day
-overstates storage and a quiet one understates it, and both look like a measurement.
-
-**Armed 2026-08-17T06:46Z by `scripts/arm_crypto_capture.sh`.**
-
-| Property | Value |
-|---|---|
-| PID | 42146, own session, detached, cwd is the repository |
-| Starts | 2026-08-17T07:00:00Z, Monday |
-| Runs for | 24.01 hours |
-| Ends | 2026-08-18T07:00:36Z, Tuesday |
-| Writes | `/var/tmp/tradingsys/crypto-rate-weekday.json`, log beside it |
-
-**All 24 hours of the day are covered exactly once and every one of them is a
-complete bucket.** The window spans two dates rather than one: Monday hours 07
-through 23, then Tuesday hours 00 through 06. Both are weekdays, which is what the
-measurement is for, and every hour of the day is sampled once. It is not the
-midnight to midnight window originally intended, for the reason below.
-
-**Why it is armed a third time, and what went wrong twice.** Worth recording,
-because both failures produced a capture that looked armed and would have produced
-a subtly wrong dataset.
-
-The first arming counted a fixed number of seconds from launch, so it would have
-started at 00:30 and put two half length buckets at the ends of a series that
-buckets by absolute UTC hour.
-
-The second computed the sleep against a wall clock target, which is correct until
-the host suspends. WSL2 froze the VM overnight: the process kept its place in the
-`sleep` while the wall clock advanced about nine hours. A capture armed for
-2026-08-16T23:59:30Z was still sleeping at 06:45Z the next morning, with 7870
-seconds left, and would have started at 08:57Z. By then Monday hours 00 through 06
-had already passed, which is why the window moved to 07:00 rather than waiting for
-next Monday: a full week of delay buys a midnight boundary and nothing else, and
-crypto retention is blocked until this reports.
-
-`scripts/arm_crypto_capture.sh` now does the waiting, and it re-reads the clock
-every thirty seconds rather than trusting an interval, so a suspend costs one poll
-of lateness instead of its whole duration. The tracker's previous advice to relaunch
-with a `sleep` computed from the clock was the thing that failed, so it has been
-replaced by the script rather than corrected in prose.
-
-**If the JSON file is absent after Tuesday**, the capture did not run. Rearm with a
-future UTC instant, choosing a weekday:
-
-```bash
-setsid nohup scripts/arm_crypto_capture.sh '2026-08-24 00:00:00' >/dev/null 2>&1 &
-```
-
-**None of the crypto rate samples taken so far may be used to size retention.**
-There are three, all from Sunday 2026-08-16, and they contradict each other by a
-factor of four on the instrument ratio. They are recorded to show that the
-question is open, not to be averaged, interpolated, or picked from:
+drift into.
+
+---
+
+### The clock defect class: read this before writing anything with a timer
+
+**This host suspends, and it has now caused three separate failures.** The class is
+recorded in `docs/DECISIONS.md`; the operational summary is here because a fresh session
+will otherwise repeat it.
+
+**The class.** A check that confirms a process exists proves nothing about whether it
+will act, or act at the right time. Existence and correct future action are different
+properties, and for anything driven by a timer or a deadline it is the second that
+matters.
+
+**The three failures, in order:**
+
+1. The crypto capture was armed by counting a fixed number of seconds from launch, so it
+   would have begun at 00:30 rather than 00:00 and put half length buckets at both ends
+   of a series that buckets by absolute UTC hour.
+2. It was rearmed with `sleep N` computed against a wall clock target. The host suspended
+   overnight; the process kept its place in the sleep while the wall clock advanced about
+   nine hours, so a capture armed for 23:59:30Z was still sleeping at 06:45Z the next
+   morning. Every check said healthy throughout: a live PID, a live sleep, an owned
+   session. Only elapsed time against wall clock revealed it.
+3. `scripts/arm_crypto_capture.sh` was fixed to poll the wall clock, and started the run
+   on time. **But `measure_crypto_rate.py` set its own deadline from the event loop
+   clock**, which is monotonic and does not advance during suspend. Measured 24 hours
+   later: **9.1 hours of loop time against 24.1 hours of wall clock**, so the host had
+   slept about 15 hours and the run needed nearly 15 more hours of loop time to finish.
+
+**The generalisation, which is the part worth carrying.** The second fix was applied
+where the defect was found rather than everywhere the defect class applies. A launcher
+that starts on time and a run that measures its own duration on a clock that stops are
+the same bug in two places, and repairing one **left the class alive while making the
+system look repaired**. When a defect class is named, the question is which other code
+makes the same assumption, not whether the reported instance is fixed.
+
+**Where this binds next, noted so it is designed rather than rediscovered:**
+
+- *Phase 5 reconciliation* must assert its own recency. A suspended host silently stops
+  reconciling while the process stays up and readiness stays green, which is exactly the
+  window a divergence would hide in. The check is when the last reconciliation completed
+  relative to now, not whether its task is alive.
+- *Phase 7 paper run* must measure elapsed wall clock coverage rather than count
+  iterations, or a suspension produces a run that believes it covered thirty days and
+  covered less, with no unhandled exception marking the gap.
+
+`src/tradingsys/app/supervisor.py` is this made executable for the ingest process: it
+reports on progress rather than liveness, and an activity past its deadline is unhealthy
+even though its task is alive and its failure count is zero.
+
+### No usable weekday crypto profile exists, and crypto retention is unsized
+
+**Status as of 2026-08-18T07:20Z: three capture attempts, none successful, none rerun.**
+The third was stopped after the diagnosis above. Because the script wrote its summary
+only on completion, stopping it discarded all nine hours it had collected.
+
+**Crypto retention therefore remains unsized**, and so does the related question of
+whether unchanged Bybit snapshot repeats should be stored as rows. Both wait on a
+successful capture. The three samples taken on Sunday 2026-08-16 contradict each other by
+a factor of four on the instrument ratio and **may not be used to size anything**:
 
 | Sample | BTC quotes/s | ETH quotes/s | ETH as a multiple of BTC |
 |---|---|---|---|
@@ -1278,19 +565,194 @@ question is open, not to be averaged, interpolated, or picked from:
 | Sunday 2026-08-16, 18 seconds | 7.7 | 5.2 | 0.68 |
 | Sunday 2026-08-16, 4 minutes | 8.1 | 4.8 | 0.60 |
 
-ETH at 2.4 times BTC in one hour and 0.6 times BTC twenty minutes later cannot
-both be a property of the instruments, so at most one of them is, and probably
-neither. Two independent facts point away from the largest figure. Bybit's own
-24 hour turnover has BTC ahead of ETH, 510M against 367M USDT, so ETH is not
-the busier market by value. And BTC's tick is finer relative to its price, 0.16
-basis points against 0.53, so BTC's top of book has more distinct prices to
-move between, which should produce more updates rather than fewer.
+ETH at 2.4 times BTC in one hour and 0.6 times BTC twenty minutes later cannot both be a
+property of the instruments. Bybit's own 24 hour turnover has BTC ahead of ETH, and BTC's
+tick is finer relative to its price, so both point away from the largest figure.
 
-Crypto retention stays unset until the 24 hour hourly breakdown exists. If that
-capture shows a rate high enough that sampling has to be considered, the
-director wants the scheme and its statistical justification, not a rate.
+**The script is now fixed** and a rerun should produce a usable result even on a host that
+suspends: the deadline is wall clock, coverage is recorded per hour in seconds with rates
+computed per covered second, the summary is written every five minutes, and reconnect log
+lines carry timestamps. The previous run logged 43 reconnects with no times, of which 23
+were DNS resolution failures, meaning the host lost networking rather than the venue
+dropping the connection.
+
+To rearm, choosing a weekday:
+
+```bash
+setsid nohup scripts/arm_crypto_capture.sh '2026-08-24 00:00:00' >/dev/null 2>&1 &
+```
 
 ---
+
+### Decisions and findings from the 2026-08-16 to 2026-08-18 session
+
+Full reasoning for each is in `docs/DECISIONS.md`, which is the file `SPEC.md` section 13
+directs a recovering session to. It was created during this session because that path was
+referenced and did not exist.
+
+| Decision or finding | Where |
+|---|---|
+| Quantisation tolerance derived at 5 percent, replacing an unanalysed 10 | `docs/DECISIONS.md`, `SPEC.md` 6.1 |
+| Capital independence made a requirement, with capital cost per strategy class | `SPEC.md` 6.1 and 6.2 |
+| Phases 4a and 4b reordered: trend first, macro second, with what reverses it | `SPEC.md` 5.1 and 8 |
+| Trading macro on crypto rejected as a category error | `docs/DECISIONS.md`, rejected options |
+| Paper results carry a one directional optimistic bias; the gate needs a stated margin | `SPEC.md` phase 8 gate |
+| Venue credentials stay off CI; venue drift is an accepted gap with a manual control | `docs/DECISIONS.md` |
+| Broker platform availability comes only from the account opening form | `docs/DECISIONS.md` |
+| The clock defect class, and fixing where found rather than where it applies | `docs/DECISIONS.md` |
+| The NFP sequence: a conclusion written before its evidence, then corrected by it | `docs/DECISIONS.md` |
+| cTrader schema vendored at a pinned commit, generated code committed | `docs/DECISIONS.md` |
+| An unknown protobuf enum arrives as an absent field and is refused | `docs/DECISIONS.md` |
+| `decimal_from_double` as a second sanctioned float door, distinct from `from_binary32` | `docs/DECISIONS.md` |
+
+**Corrections made during the session, kept because the sequence matters more than the
+answer:**
+
+- A stop ceiling was first reported as though it settled viability. It does not: it
+  measures only where size falls below the venue minimum and says nothing about
+  quantisation. Corrected to the full screen, which excluded every forex class.
+- The demo feed was inferred to be unrepresentative because it does not widen at a
+  release. A Dukascopy cross-check found the same absence, so the inference was withdrawn
+  and the `SPEC.md` entry rewritten. The surviving argument is stronger and was not
+  reachable by reasoning from the first result: quote data cannot measure execution cost
+  at all, because what degrades at a release is the size executable at the quoted price
+  rather than the quote itself.
+- Cost and sizing were treated as one constraint. They are orthogonal, because cost as a
+  fraction of risk cancels position size. Killing 5 pip scalping therefore moved the
+  target rather than closing the question.
+
+### Still open for the director
+
+| Item | What it needs |
+|---|---|
+| Whether `/health` should register an internal invariant such as a stalled loop detector | A decision. The empty check list is deliberate: liveness must not depend on anything external. The concern that an endpoint asserting nothing gets trusted for more than it checks is not answered by that |
+| Unchanged Bybit snapshot repeats stored as rows | The measured row counts from a successful capture, then a decision. Up to 28,800 rows per instrument per day carry no information in a quiet market. The detection rule is exact, since an unchanged repeat reuses the update id |
+| Which of the three forex options to take | A decision. A second venue adapter is real work and should be chosen rather than drifted into |
+| The margin above break even that the phase 8 gate requires | A stated figure, set before the paper period begins. It cannot be derived from quote data and needs real fills, so it is a judgement recorded at the gate |
+| Dukascopy volume units | A published definition, or a cross check against Pepperstone over an overlapping window with the ratio reported |
+| Whether to rerun the crypto capture on this host or somewhere that stays awake | A decision. The fixed script makes a partial capture usable rather than misleading, but a contiguous 24 hours may not be achievable here |
+
+---
+
+### Measurements worth not repeating
+
+**Funding drag on a 200 USD account.** Measured 2026-08-16 from Bybit's own funding
+history, 600 settlements per instrument covering 199.7 days. ETH/USDT perpetual, funding
+per 8 hours: mean signed 0.001442 percent, mean absolute 0.004299, median 0.001885, 95th
+percentile 0.009828, worst observed 0.020824. A long pays in 387 of 600 settlements.
+
+The result does not depend on account size, because funding is charged on notional and
+risk is notional times stop distance, so funding cost as a fraction of one R is the
+funding rate divided by the stop distance. At a 1 percent stop: one day costs 0.43 percent
+of 1R at mean rates and 2.95 percent at the 95th percentile; seven days cost 3.03 and 20.6
+percent. This produced `SPEC.md` section 5.5.
+
+**BTC/USDT perpetual is excluded from trading but not from recording.** From Bybit
+metadata on 2026-08-16 with BTC at 63,035 and ETH at 1,880 USDT: BTC's 0.001 step is
+63.03 USDT of notional and gives three distinct sizes inside a 2.00 USD budget, so
+realised risk can sit up to 31 percent from the intended 1 percent. ETH's 0.01 step gives
+ten sizes and a 10.6 percent widest affordable stop. Recording continues for both, because
+Bybit publishes no historical quote data at all, so crypto spread history begins when we
+start recording and cannot be recovered later.
+
+**The venue assumptions check.** `scripts/check_venue_assumptions.py`, last run
+2026-08-17: 35 checks, 35 passed. It asserts the handshake, the live flag against the
+configured environment, the trader login to ctidTraderAccountId mapping, the account
+balance and its `moneyDigits` exponent, the venue heartbeat interval, survival of an idle
+period, and the metadata shape of every instrument in the universe. **It must be run
+before each phase closes and before any deployment**, because CI cannot catch venue drift.
+
+**Facts about the venue that took work to establish:**
+
+| Fact | Value |
+|---|---|
+| Account number to venue account id | 5325402 maps to ctidTraderAccountId 48268952. Different numbers; only the venue can supply the mapping |
+| Account balance | 200 USD, reported with `moneyDigits` 2 |
+| Venue heartbeat interval | 30.0 seconds, measured over a 150 second idle window |
+| Read deadline | 95 seconds, sized at two missed venue heartbeats plus margin. It was 20 seconds and would have killed every healthy idle connection |
+| Catalogue size | 1939 symbols, 2583 assets |
+| FX minimum and step | 1000 units on all 90 currency pairs |
+| Commission | 3.00 USD per standard lot per side |
+| Trendbar and tick prices | Integers scaled by ten to the fifth, regardless of the symbol's own digits |
+| Historical tick data | Delta encoded and newest first, one series per quote type. 92.8 percent of bid and ask ticks share an exact timestamp |
+
+---
+
+### Infrastructure notes
+
+**The repository has a remote.** `https://github.com/alexhaya4/tradingsys`, private,
+created 2026-08-16. History was scanned for credentials before the first push, not after:
+every value in `.env` was searched across every blob in every commit and every commit
+message, plus patterns for GitHub, AWS and Slack tokens and PEM headers. No credential
+value appears anywhere in the history. The Pepperstone demo account number appears in
+`SPEC.md` deliberately and appeared in two config test fixtures, which now use a
+placeholder of the same shape; it is an identifier rather than a credential and the
+account is a demo.
+
+**CI runs `scripts/verify.sh --fresh --down` on every branch**, and reads the workflow
+from the branch being pushed. It had never executed once before 2026-08-16 while being
+counted as coverage, which is recorded as a defect because a check that never runs
+produces no red. **CI cannot catch venue drift**, which is an accepted gap with
+`scripts/check_venue_assumptions.py` as its manual control.
+
+**Commits are not GPG signed**, deliberately, and `commit.gpgsign` is set to false in the
+repository-local git config so the repository matches its own recorded decision rather
+than every session passing a flag and rediscovering why.
+
+**The phase branch is not merged into `main`, and merging it is not a way to make CI
+fire.** Phase branches merge when the phase completes and its exit criteria are met.
+
+### Defects found this session, with their diagnoses
+
+Recorded because the diagnosis is worth more than the fix.
+
+**1. The rate limiter livelocked, inside a lock.** `RateLimiter.acquire` computed the
+missing tokens, slept exactly that long, then re-measured the clock. The refill is
+`(now - updated) * rate` in binary floating point, so the recomputed balance can land a
+fraction of an ulp below the requested cost, and the next wait is a few nanoseconds, then
+smaller, until the loop spins forever holding an `asyncio.Lock`. Two tests written before
+the fix did not fail, they hung: a livelock does not report itself. Fixed by reserving
+tokens against the instant they will exist rather than re-measuring.
+
+**2. The stream's reconnect catch tuple omitted the only exception that mattered.** It
+caught `(VenueConnectivityError, VenueResponseError, OSError, TimeoutError)`, which reads
+as comprehensive. The `websockets` library signals a dropped connection with its own type,
+which does not inherit from `OSError`, so the recorder would have exited on the first
+disconnection, on a market that never closes and has no historical quote source to
+backfill from.
+
+**3. A nanosecond epoch divided in a float.** `BybitRestClient.server_time` computed
+`nanoseconds / 1_000_000_000` as a float. A double has 53 bits of mantissa and a
+nanosecond epoch needs about 61, so low digits were silently discarded. Now integer
+`divmod` with the remainder truncated rather than rounded, so the recorded instant never
+lands after the instant the venue reported.
+
+**4. CI existed and had never run once.** The workflow triggered only on pushes to `main`,
+and `main` has no `.github/` directory, so a push to the phase branch matched no trigger.
+Every claim about CI enforcing anything was untrue and nothing revealed it, because a
+pipeline that never runs produces no red.
+
+**5. The CI metrics probe, diagnosed and recorded as unexplained.** Run 31939779488 failed
+on `/metrics did not expose tradingsys_build_info`. Classification proven: a race, not a
+regression, because the same commit passes on re-run and the commits either side changed
+markdown only. The original hypothesis, that readiness was lying, was disproven: `/ready`
+and `/metrics` are two routes on one app closing over one registry built before the port
+is bound, verified by 40 fresh starts, 4000 concurrent requests and 300 pipeline runs.
+**The cause is still unexplained and is recorded as such rather than as fixed.** What was
+defective is the probe, which conflated a refused connection, an HTTP error, a broken pipe
+and a genuinely missing series into one message, and which under `pipefail` could fail
+while the series was present. It now reports the byte count and the first twenty lines of
+what came back.
+
+**6. The read deadline was shorter than the venue's heartbeat.** 20 seconds against a
+measured 30, so every healthy idle connection would have been declared dead and
+reconnected in a loop. No unit test could have caught it, because the scripted peer sends
+whatever the test tells it to.
+
+**7. The clock defect class**, three instances, described above.
+
+The lesson across all of them: anything asserted about the world outside the repository
+has to be observed happening at least once.
 
 ## Phases 3 through 9
 
@@ -1299,12 +761,15 @@ a phase before the previous phase's exit criteria are all met.
 
 ---
 
-## Open questions for the director
+## Open questions for the director, historical
+
+**These are all resolved and are kept as a record.** The questions that are actually
+open as of 2026-08-18 are in the phase 2 section under "Still open for the director".
 
 | Question | Raised | Resolved |
 |---|---|---|
 | OANDA live account eligibility for Kenya, needed before phase 8 | Phase 1 | Resolved: OANDA does not accept Kenyan registrations. Venue changed to cTrader via Pepperstone |
-| Primary crypto exchange selection, needed before phase 2 | Phase 1 | Resolved: Bybit, inferred from the position model decision. Confirm |
+| Primary crypto exchange selection, needed before phase 2 | Phase 1 | Resolved: Bybit. Inferred from the position model decision, then confirmed by the director |
 | Instrument universe: which pairs and markets to cover initially | Phase 1 | Resolved: EUR/USD, GBP/USD, USD/JPY, AUD/USD, BTC/USDT, ETH/USDT |
 | Base currency for accounting | Phase 1 | Resolved: USD |
 | Starting capital, needed to set risk limits in absolute terms | Phase 5 | Resolved: 200 USD, demo funded to match. Risk stays percentage-based, instruments whose minimum exceeds 1 percent risk are excluded and reported |
