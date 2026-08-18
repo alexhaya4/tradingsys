@@ -14,12 +14,17 @@ import pytest
 
 from tests.venues.ctrader.scripted_venue import ScriptedAccount, ScriptedVenue
 from tradingsys.config.settings import ForexVenueSettings, VenueEnvironment
+from tradingsys.core.errors import TradingSysError
 from tradingsys.venues.ctrader.connection import (
     ACCOUNT_AUTH_REQ,
     APPLICATION_AUTH_REQ,
     GET_ACCOUNTS_REQ,
     CTraderConnection,
 )
+from tradingsys.venues.ctrader.framing import envelope_for
+from tradingsys.venues.ctrader.messages.OpenApiCommonMessages_pb2 import ProtoMessage
+from tradingsys.venues.ctrader.messages.OpenApiMessages_pb2 import ProtoOASpotEvent
+from tradingsys.venues.ctrader.spots import SPOT_EVENT
 from tradingsys.venues.errors import VenueAuthenticationError, VenueConnectivityError
 
 pytestmark = pytest.mark.asyncio
@@ -327,3 +332,60 @@ class TestClosing:
         sent_at_close = connection.stats.heartbeats_sent
         await asyncio.sleep(0.1)
         assert connection.stats.heartbeats_sent == sent_at_close
+
+
+class TestUnsolicitedEventHandler:
+    """Registration after construction, which the constructor alone cannot express.
+
+    A spot subscription is keyed by numeric symbol id, and those ids come from a
+    catalogue fetch over the same connection, so the subscriber does not exist until
+    the connection is open. The constructor argument stays for callers that do know
+    their handler up front.
+    """
+
+    async def test_a_handler_registered_after_open_receives_events(self) -> None:
+        venue = ScriptedVenue(accounts=[DEMO_ACCOUNT])
+        connection = CTraderConnection(venue, settings())
+        received: list[int] = []
+
+        async def handler(envelope: ProtoMessage) -> None:
+            received.append(envelope.payloadType)
+
+        await connection.open()
+        try:
+            connection.on_unsolicited(handler)
+            event = ProtoOASpotEvent()
+            event.ctidTraderAccountId = DEMO_ACCOUNT.ctid_trader_account_id
+            event.symbolId = 1
+            venue.push(envelope_for(SPOT_EVENT, event))
+            await asyncio.sleep(0.05)
+        finally:
+            await connection.close()
+
+        assert received == [SPOT_EVENT]
+
+    async def test_replacing_a_handler_is_refused(self) -> None:
+        """Silently replacing it would leave the previous subscriber alive, holding
+        state it believes is being fed, reporting a quiet market rather than an error."""
+        venue = ScriptedVenue(accounts=[DEMO_ACCOUNT])
+
+        async def first(_envelope: ProtoMessage) -> None:
+            return None
+
+        async def second(_envelope: ProtoMessage) -> None:
+            return None
+
+        connection = CTraderConnection(venue, settings(), on_event=first)
+        with pytest.raises(TradingSysError, match="already set"):
+            connection.on_unsolicited(second)
+
+    async def test_registering_twice_is_refused(self) -> None:
+        venue = ScriptedVenue(accounts=[DEMO_ACCOUNT])
+        connection = CTraderConnection(venue, settings())
+
+        async def handler(_envelope: ProtoMessage) -> None:
+            return None
+
+        connection.on_unsolicited(handler)
+        with pytest.raises(TradingSysError, match="already set"):
+            connection.on_unsolicited(handler)

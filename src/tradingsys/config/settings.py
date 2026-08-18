@@ -189,6 +189,78 @@ class RedisSettings(_Section):
 
 
 @final
+class IngestSettings(_Section):
+    """Intervals and stall deadlines for the ingest process.
+
+    Every deadline here is a wall clock duration compared against `Clock.now()` by the
+    supervisor, never an interval counted by a loop. That distinction is the subject of
+    the clock defect class in `docs/DECISIONS.md`, and it is the reason these are
+    deadlines rather than timeouts: a deadline can be missed by a host that stopped, and
+    a timeout on a stopped clock simply never fires.
+
+    Attributes:
+        registry_interval_seconds: How often instrument definitions are refreshed from
+            the venues. Venue metadata changes rarely, so this is hours rather than
+            minutes, but it is not once at startup: a broker that changes a minimum lot
+            mid-run has to be noticed during the run.
+        backfill_interval_seconds: How often the backfill looks for missing hours.
+        backfill_window_seconds: How far back each backfill pass considers.
+        quote_deadline_seconds: Longest the crypto stream may go without a quote before
+            it is stalled.
+        registry_deadline_seconds: Longest between completed registry syncs.
+        backfill_deadline_seconds: Longest between completed backfill passes.
+    """
+
+    registry_interval_seconds: PositiveSeconds
+    backfill_interval_seconds: PositiveSeconds
+    backfill_window_seconds: PositiveSeconds
+    quote_deadline_seconds: PositiveSeconds
+    registry_deadline_seconds: PositiveSeconds
+    backfill_deadline_seconds: PositiveSeconds
+
+    @model_validator(mode="after")
+    def _deadlines_exceed_their_intervals(self) -> Self:
+        """A deadline at or below its own interval reports a stall on every healthy pass.
+
+        The activity reports progress once per completed pass, so the gap between
+        reports is the interval plus however long the pass took. A deadline that does
+        not exceed the interval therefore fires during normal operation, and an alert
+        that fires when nothing is wrong is worse than no alert: it is the one people
+        learn to ignore before the real one arrives.
+        """
+        pairs = (
+            ("registry", self.registry_interval_seconds, self.registry_deadline_seconds),
+            ("backfill", self.backfill_interval_seconds, self.backfill_deadline_seconds),
+        )
+        for name, interval, deadline in pairs:
+            if deadline <= interval:
+                raise ValueError(
+                    f"{name}_deadline_seconds ({deadline}) must exceed "
+                    f"{name}_interval_seconds ({interval}), or a healthy pass is "
+                    f"reported as a stall on every cycle"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _backfill_window_covers_its_interval(self) -> Self:
+        """The window has to cover any gap the process itself can create.
+
+        Each pass queues the hours missing inside a window ending now. If the window is
+        shorter than the gap between passes, hours fall out of every window before any
+        pass looks at them and are never backfilled. Nothing reports this: the queue is
+        empty and every pass succeeds. The margin is the deadline rather than the
+        interval, because the deadline is the longest a pass may legitimately be late.
+        """
+        if self.backfill_window_seconds <= self.backfill_deadline_seconds:
+            raise ValueError(
+                f"backfill_window_seconds ({self.backfill_window_seconds}) must exceed "
+                f"backfill_deadline_seconds ({self.backfill_deadline_seconds}), or an "
+                f"hour can fall out of the window before any pass considers it and is "
+                f"then never backfilled, with nothing reporting the loss"
+            )
+        return self
+
+
 class ObservabilitySettings(_Section):
     """Logging, metrics, and the operational HTTP endpoints."""
 
@@ -638,6 +710,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings
     redis: RedisSettings
     observability: ObservabilitySettings
+    ingest: IngestSettings
     venues: VenuesSettings = Field(default_factory=VenuesSettings)
 
     @classmethod

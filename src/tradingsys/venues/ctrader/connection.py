@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Protocol, Self, final
 
 from tradingsys.config.settings import VenueEnvironment
+from tradingsys.core.errors import TradingSysError
 from tradingsys.observability.logging import get_logger
 from tradingsys.venues.ctrader.framing import (
     LENGTH_PREFIX_BYTES,
@@ -261,6 +262,32 @@ class CTraderConnection:
                 VENUE, "the account identifier is not known until the handshake has completed"
             )
         return self._ctid_trader_account_id
+
+    def on_unsolicited(
+        self, handler: Callable[[ProtoMessage], Coroutine[object, object, None]]
+    ) -> None:
+        """Set the handler for messages the venue sends without being asked.
+
+        Exists because the constructor cannot express what a subscriber needs. A spot
+        subscription is keyed by numeric symbol id, and those ids are only knowable from
+        a catalogue fetch over this same connection, so the subscriber cannot be built
+        until the connection is already open and dispatching. Passing the handler at
+        construction forces an indirection object whose only purpose is to be mutable,
+        which is this method with worse ergonomics and no error checking.
+
+        Raises:
+            TradingSysError: A handler is already set. Replacing one silently would
+                leave the previous subscriber alive, holding state it believes is being
+                fed, while every event went somewhere else. That failure is invisible:
+                the old subscriber simply reports a quiet market forever.
+        """
+        if self._on_event is not None:
+            raise TradingSysError(
+                "an unsolicited event handler is already set on this connection; "
+                "replacing it would silently starve the previous subscriber, which "
+                "would go on reporting a quiet market rather than an error"
+            )
+        self._on_event = handler
 
     async def open(self) -> None:
         """Start the reader and heartbeat, then authenticate.

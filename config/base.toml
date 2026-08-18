@@ -45,6 +45,32 @@ ready_path = "/ready"
 metrics_path = "/metrics"
 readiness_timeout_seconds = 3.0
 
+[ingest]
+# Intervals and stall deadlines for the ingest process. Every deadline is compared
+# against the wall clock by the supervisor, never counted by a loop, for the reason in
+# the clock defect class in docs/DECISIONS.md.
+
+# Venue metadata changes rarely. Six hours is not once at startup on purpose: a broker
+# that changes a minimum lot mid-run has to be noticed during the run, because that
+# minimum is what the eligibility screen excludes instruments on.
+registry_interval_seconds = 21600.0
+registry_deadline_seconds = 25200.0
+
+# The backfill queues whatever hours the gap detector finds missing inside its window.
+backfill_interval_seconds = 3600.0
+backfill_deadline_seconds = 5400.0
+
+# WHAT BREAKS IF THIS SHRINKS: the window must exceed the deadline above, or an hour
+# can fall out of every window before any pass considers it and is then never
+# backfilled, with an empty queue and successful passes reporting nothing wrong. Seven
+# days also covers a multi-day outage without a manual catch-up.
+backfill_window_seconds = 604800.0
+
+# Bybit publishes a level one snapshot at least every three seconds even when nothing
+# changes, so silence well past that is death rather than a quiet market. Thirty
+# seconds is ten of those, which tolerates a reconnect with its backoff.
+quote_deadline_seconds = 30.0
+
 [venues.forex]
 # cTrader Open API, reached through Pepperstone. See PROGRESS.md for why this is
 # cTrader rather than OANDA.

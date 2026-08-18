@@ -60,6 +60,14 @@ health_path = "/health"
 ready_path = "/ready"
 metrics_path = "/metrics"
 readiness_timeout_seconds = 3.0
+
+[ingest]
+registry_interval_seconds = 21600.0
+registry_deadline_seconds = 25200.0
+backfill_interval_seconds = 3600.0
+backfill_deadline_seconds = 5400.0
+backfill_window_seconds = 604800.0
+quote_deadline_seconds = 30.0
 """
 
 

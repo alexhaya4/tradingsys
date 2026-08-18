@@ -36,6 +36,7 @@ from tradingsys.observability.logging import get_logger
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
 
+    from tradingsys.config.settings import IngestSettings
     from tradingsys.core.clock import Clock
     from tradingsys.marketdata.backfill_job import BackfillJob
     from tradingsys.marketdata.recorder import QuoteRecorder
@@ -74,6 +75,24 @@ class IngestPlan:
     quote_deadline: timedelta
     registry_deadline: timedelta
     backfill_deadline: timedelta
+
+    @classmethod
+    def from_settings(cls, settings: IngestSettings) -> IngestPlan:
+        """Build the plan from configuration.
+
+        The relationships between these values are validated on
+        :class:`~tradingsys.config.settings.IngestSettings`, not here, so a bad
+        combination fails at startup with the other configuration errors rather than
+        when the first backfill pass silently skips an hour.
+        """
+        return cls(
+            registry_interval=timedelta(seconds=settings.registry_interval_seconds),
+            backfill_interval=timedelta(seconds=settings.backfill_interval_seconds),
+            backfill_window=timedelta(seconds=settings.backfill_window_seconds),
+            quote_deadline=timedelta(seconds=settings.quote_deadline_seconds),
+            registry_deadline=timedelta(seconds=settings.registry_deadline_seconds),
+            backfill_deadline=timedelta(seconds=settings.backfill_deadline_seconds),
+        )
 
 
 @final
