@@ -985,6 +985,74 @@ autovacuum and any local dump need working room. Effective capacity is therefore
 64 GB, which at the measured 243.81 and 21.90 bytes per tick row carries about 22 months
 at a 40 per second combined rate rather than the full 24.
 
+### Sizing error: the droplet disk was read as the database disk
+
+Recorded by the director on 2026-08-19 as a director-side error, because the same
+conflation can recur every time the volume is resized.
+
+**What happened.** The host was specified as 2 vCPU, 4 GB, 80 GB, and the retention
+arithmetic was done against that 80 GB. The droplet does have an 80 GB disk, but
+`db_data` is bound to a separate block storage volume, which was created at 20 GB. The
+number the retention horizon depended on was therefore four times the real one, and the
+runway at a 40 per second combined rate fell from about 22 months to about 4.6.
+
+**Why it was not obvious.** Both numbers are real and both describe this host. Nothing
+was wrong except which of the two the database writes to, and that is a property of the
+compose overlay rather than of the droplet. A sizing figure that names a machine rather
+than a mount point does not carry the distinction, so it survives review.
+
+**The rule.** Storage arithmetic names the **mount point** it applies to, never the host.
+`deploy/provision/RUNBOOK.md` states the runway against `/mnt/tradingsys_db` explicitly,
+and `deploy/provision/healthcheck.sh` asserts against that mount and refuses to report on
+it if it turns out to be the root device, which is the same error appearing as a
+monitoring result rather than as a plan.
+
+**Where it recurs.** At every resize. Growing the volume changes the runway and growing
+the droplet does not, and the two are bought in different places in the provider's
+interface. The forecast in `healthcheck.sh` is deliberately expressed in days remaining
+rather than percent used for this reason: a percentage of the wrong device still looks
+like an answer, while a projection that disagrees with the recorded arithmetic does not.
+
+### Storage headroom is monitored as a projection, not as a percentage
+
+Directed by the director on 2026-08-19, on the reasoning that headroom alerting was a
+nicety while the horizon was two years and is load bearing at four months.
+
+Three changes, each with its own reason.
+
+**It asserts against the volume, not the root disk.** A check that reads whichever device
+happens to hold the path is the sizing error above, recurring as a green dashboard. The
+check resolves the device behind the mount and fails if it is the root device, because at
+that point the number it would report is true of the wrong disk.
+
+**It alerts at 70 percent rather than 80.** 80 percent is where Postgres becomes
+constrained, since `compress_chunk` writes the compressed chunk before dropping the
+uncompressed one and the daily job peaks above steady state. An alert at the point of
+constraint leaves no time to act, so the alert moves to 70 and the operating limit stays
+at 80.
+
+**It reports projected days to full at the observed rate.** A percentage says where the
+volume is; a projection says whether to act this week. The projection uses the measured
+21.90 bytes per compressed tick row against rows actually written in the last 24 hours,
+because in steady state each day adds one compressed day while the seven day uncompressed
+window stays a constant size. Before day seven the growth is the uncompressed 243.81 and
+the projection says so rather than flattering itself.
+
+### Retention is a lever on storage, and is priced against the volume rather than assumed
+
+Framed by the director on 2026-08-19. The 24 month retention in `SPEC.md` section 4.0 was
+chosen when storage looked free, and it is a configuration value rather than a constant
+precisely so that it can be reconsidered.
+
+**The tradeoff.** Shortening retention costs research depth on old data, once. Resizing
+the volume costs money every month, forever. Neither is obviously right, and which one is
+cheaper depends on a number that is not yet measured.
+
+**What is owed when the weekday capture lands**, so the decision is framed rather than
+defaulted into: the volume size required for 24 months at the measured p95 hour rate, and
+the retention window that fits comfortably inside 60 GB at that same rate, both priced.
+The default of buying disk is not to be taken silently.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited

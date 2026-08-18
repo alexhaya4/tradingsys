@@ -25,22 +25,91 @@ check() {
     fi
 }
 
-volume_mounted() {
+# Measured 2026-08-18 against real venue output loaded into the real schema. Provenance
+# is in PROGRESS.md; these are the constants the retention arithmetic uses and they are
+# named here so a projection cannot silently disagree with the plan.
+BYTES_PER_ROW_COMPRESSED=21.90
+BYTES_PER_ROW_UNCOMPRESSED=243.81
+COMPRESS_AFTER_DAYS=7
+
+# 80 percent is where Postgres becomes constrained, because compress_chunk writes the
+# compressed chunk before dropping the uncompressed one and the daily job peaks above
+# steady state. Alerting there leaves no time to act, so the alert is at 70.
+ALERT_PERCENT="${TRADINGSYS_VOLUME_ALERT_PERCENT:-70}"
+OPERATING_LIMIT_PERCENT=80
+
+volume_is_its_own_device() {
+    # The sizing error this guards against: reading the droplet disk as the database
+    # disk. A percentage of the wrong device still looks like an answer.
     mountpoint -q "$DATA_ROOT" || { echo "${DATA_ROOT} is not a mount point, so Postgres would be writing to the root disk"; return 1; }
-    df -h --output=used,size,pcent "$DATA_ROOT" | tail -1 | tr -s ' '
+    local data_dev root_dev
+    data_dev="$(findmnt --noheadings --output SOURCE --target "$DATA_ROOT")"
+    root_dev="$(findmnt --noheadings --output SOURCE --target /)"
+    if [[ "$data_dev" == "$root_dev" ]]; then
+        echo "${DATA_ROOT} resolves to the root device ${data_dev}; every storage figure below would describe the wrong disk"
+        return 1
+    fi
+    echo "${data_dev} $(findmnt --noheadings --output FSTYPE,SIZE --target "$DATA_ROOT")"
 }
 
 volume_headroom() {
     local pct
     pct="$(df --output=pcent "$DATA_ROOT" | tail -1 | tr -dc '0-9')"
-    # 80 percent is the operating limit, not the full disk: compress_chunk writes the
-    # compressed chunk before dropping the uncompressed one, so the daily job peaks
-    # above steady state and needs the room.
-    if [[ "$pct" -ge 80 ]]; then
-        echo "${pct} percent full, at or past the 80 percent Postgres operating limit"
+    local used avail
+    used="$(df -h --output=used "$DATA_ROOT" | tail -1 | tr -d ' ')"
+    avail="$(df -h --output=avail "$DATA_ROOT" | tail -1 | tr -d ' ')"
+    if [[ "$pct" -ge "$ALERT_PERCENT" ]]; then
+        echo "${pct} percent full (${used} used, ${avail} free), at or past the ${ALERT_PERCENT} percent alert threshold; the ${OPERATING_LIMIT_PERCENT} percent Postgres operating limit is next"
         return 1
     fi
-    echo "${pct} percent full, limit is 80"
+    echo "${pct} percent full (${used} used, ${avail} free), alert at ${ALERT_PERCENT}, operating limit ${OPERATING_LIMIT_PERCENT}"
+}
+
+volume_projection() {
+    # A percentage says where the volume is. A projection says whether to act this week.
+    local rows age_days
+    rows="$($COMPOSE exec -T db psql -qtAX -U "${POSTGRES_USER:-tradingsys}" -d "${POSTGRES_DB:-tradingsys}" \
+        -c "SELECT count(*) FROM ticks WHERE ts >= now() - interval '24 hours'" 2>&1)" \
+        || { echo "could not query the tick table: $(tail -1 <<<"$rows")"; return 1; }
+    if ! [[ "$rows" =~ ^[0-9]+$ ]]; then
+        echo "the tick table did not answer with a count: $(head -c 200 <<<"$rows")"
+        return 1
+    fi
+    if [[ "$rows" -eq 0 ]]; then
+        echo "no ticks in the last 24 hours, so there is no observed rate to project from"
+        return 0
+    fi
+
+    age_days="$($COMPOSE exec -T db psql -qtAX -U "${POSTGRES_USER:-tradingsys}" -d "${POSTGRES_DB:-tradingsys}" \
+        -c "SELECT COALESCE(EXTRACT(epoch FROM now() - min(ts)) / 86400, 0)::int FROM ticks" 2>/dev/null)"
+    [[ "$age_days" =~ ^[0-9]+$ ]] || age_days=0
+
+    local avail_bytes
+    avail_bytes="$(df --output=avail --block-size=1 "$DATA_ROOT" | tail -1 | tr -dc '0-9')"
+    local total_bytes
+    total_bytes="$(df --output=size --block-size=1 "$DATA_ROOT" | tail -1 | tr -dc '0-9')"
+
+    # In steady state each day adds one compressed day while the seven day uncompressed
+    # window stays a constant size. Before day seven nothing has been compressed yet, so
+    # the growth rate is the uncompressed figure and saying otherwise would flatter it.
+    awk -v rows="$rows" -v avail="$avail_bytes" -v total="$total_bytes" \
+        -v comp="$BYTES_PER_ROW_COMPRESSED" -v uncomp="$BYTES_PER_ROW_UNCOMPRESSED" \
+        -v age="$age_days" -v after="$COMPRESS_AFTER_DAYS" -v alert="$ALERT_PERCENT" '
+    BEGIN {
+        steady = (age >= after)
+        per_row = steady ? comp : uncomp
+        per_day = rows * per_row
+        if (per_day <= 0) { print "observed rate is zero, nothing to project"; exit 0 }
+        to_full  = avail / per_day
+        headroom = (total * alert / 100) - (total - avail)
+        to_alert = headroom / per_day
+        phase = steady ? "steady state, compressed" : "first " after " days, not yet compressed"
+        printf "%d rows/24h at %.2f B/row (%s), %.2f GB/day: %.0f days to full", \
+               rows, per_row, phase, per_day / 1e9, to_full
+        if (to_alert > 0) printf ", %.0f days to the %d percent alert", to_alert, alert
+        else printf ", already past the %d percent alert", alert
+        printf "\n"
+    }'
 }
 
 unit_enabled() {
@@ -109,8 +178,9 @@ clock_sane() {
 
 echo "tradingsys host verification"
 echo
-check "block volume mounted"        volume_mounted
-check "block volume headroom"       volume_headroom
+check "volume is its own device"    volume_is_its_own_device
+check "volume headroom"             volume_headroom
+check "volume projection"           volume_projection
 check "systemd unit"                unit_enabled
 check "containers running"          containers_up
 check "app liveness /health"        app_live
