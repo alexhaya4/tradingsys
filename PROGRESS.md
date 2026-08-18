@@ -321,19 +321,19 @@ is either done or is a decision waiting on the director.
 | CI probe diagnosis and repair | Complete | Race not regression, proven by re-run. Cause unexplained; probe repaired so a recurrence is diagnosable from the log |
 | cTrader adapter: transport | Complete | TLS, length prefixed protobuf framing, handshake, live flag assertion, heartbeat. Verified against the real demo account |
 | cTrader adapter: symbol metadata | Complete | Digits, pip position, volumes, swap rates and charging convention, trading mode, schedule |
-| Instrument registry from venue metadata | Complete | Sync compares before writing and reports drift by field. cTrader source built |
+| Instrument registry from venue metadata | **Partial** | `RegistrySync` is complete and tested at 94 percent: it compares before writing and reports drift by field. `venues/ctrader/source.py` measures 0 percent coverage and is constructed by nothing, so the cTrader source is written and unverified |
 | Resumable Dukascopy backfill | Complete | Queue, runner, HTTP fetcher. Concurrency 3, retries with backoff, failed hours retried rather than skipped |
 | Backfill caller | Complete | Queues missing open hours from the instrument's own schedule, then drains |
 | Capital independence, SPEC 6.1 | Complete | Dynamic screen, property tests over eight orders of magnitude, structural guard against absolute amounts |
 | Sizing deliverable | Complete | Reported below. No forex class is eligible at 200 USD |
 | Round trip cost measurement | Complete | Reported below. Commission dominates; spread is near zero on a raw account |
-| Supervised ingest process | Complete | Supervisor reports on progress, not liveness |
+| Supervised ingest process | **Not complete** | `Supervisor` is complete and tested at 98 percent. `app/ingest.py` measures 0 percent coverage across 71 statements, is constructed by no entry point, and `IngestPlan` has no configuration section. Written, unwired, untested |
 | **cTrader live quote subscription** | **Not started** | **The only thing blocking the 72 hour run** |
 | cTrader refresh token call | Not started | Credentials are modelled and expiry is on the interface; the HTTP refresh call is not written |
 | Reconnection with resynchronisation | Not started | Deliberately deferred: it belongs with the subscription state it must restore, and that state does not exist until the spot subscription does |
 | Weekday crypto rate capture | **Failed, not rerun** | Three attempts, all lost to the clock defect. No usable profile exists |
 | Crypto retention window | **Blocked** | Cannot be sized until a capture succeeds |
-| 72 hour continuous ingestion run | **Blocked** | Needs the cTrader spot subscription |
+| 72 hour continuous ingestion run | **Blocked** | Needs the cTrader spot subscription, the ingest wiring above, and a host that does not suspend |
 
 ### Outstanding work, in the order it should be done
 

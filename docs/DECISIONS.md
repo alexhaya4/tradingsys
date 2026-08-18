@@ -838,6 +838,57 @@ reconciliation loop and phase 7's paper run must both measure elapsed wall clock
 than count iterations or trust a monotonic timer, and this is now the second piece of
 evidence that the distinction is not theoretical on this host.
 
+### On this host `CLOCK_BOOTTIME` is `CLOCK_MONOTONIC`, so the portable remedy does not work
+
+Measured 2026-08-18T07:34Z. `time.clock_gettime(CLOCK_MONOTONIC)` returned 133629.048039
+and `time.clock_gettime(CLOCK_BOOTTIME)` returned 133629.048047, a difference of eight
+microseconds against an uptime of 37 hours. They are the same clock here.
+
+**Why this is worth writing down.** The textbook fix for a timer that stops during
+suspend is to move it from `CLOCK_MONOTONIC`, which excludes suspended time, to
+`CLOCK_BOOTTIME`, which includes it. That is the first thing a session will reach for
+after reading the three clock failures above, and on this host it changes nothing. WSL2
+does not advance either clock across a host suspend, so a deadline built on `BOOTTIME`
+drifts exactly as far as one built on `MONOTONIC`.
+
+**The consequence, which is the rule.** Every fix in this defect class goes through
+`Clock.now()` and wall clock arithmetic. There is no monotonic clock available here that
+survives suspend, so the choice is not between two monotonic clocks, it is between wall
+clock and being wrong.
+
+**A related limit worth knowing.** Past suspend cannot be measured after the fact on this
+host either. `/proc/stat` `btime` is recomputed as `now - uptime`, so it agrees with the
+monotonic clock by construction and can never witness a gap. The only way a suspension
+becomes observable is for a running process to have recorded wall clock instants across
+it, which is why coverage recording is a requirement of any long measurement here and not
+a nicety.
+
+### A component is complete when something that runs constructs it, not when its file exists
+
+Directed by the director on 2026-08-18, after `PROGRESS.md` carried "Complete" for
+`app/ingest.py`, which no code constructs, no configuration configures, and no test
+exercises. It measured 0 percent coverage across 71 statements.
+
+**The definition.** A component is complete when all three hold:
+
+1. It is **constructed by something that runs**, meaning a production entry point rather
+   than only a test or a script.
+2. It is **configured**, meaning its parameters come from the configuration system rather
+   than from a constructor argument with no caller.
+3. It is **tested**, meaning behaviour and failure modes, not import.
+
+Writing the module satisfies none of these. `SPEC.md` section 12 already required real
+implementation and tests; what it did not say, and what was exploited without anyone
+intending to, is that a file can satisfy every line of a definition of done while being
+unreachable from the running system.
+
+**Why the tracker is where this bites.** This is the second false claim `PROGRESS.md` has
+carried, after it recorded CI as enforcing gates during a period when the workflow had
+never triggered once. Both have the same shape: a written status that no observation
+supports, in a file whose whole purpose is to be trusted by a session that cannot check
+everything. The rule that follows is that a status line is a claim about an observation,
+and the observation is named in the row or the row does not say Complete.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited
