@@ -795,6 +795,49 @@ The general form: when a conclusion is written before the evidence that would te
 the test is worth running even when the conclusion is expected to survive, because what
 it changes may be the reasoning rather than the answer.
 
+### The same clock defect a third time, now inside the measurement itself
+
+Found 2026-08-18. The capture was armed correctly and still failed, because the fix had
+been applied to the launcher and not to the thing being launched.
+
+`scripts/arm_crypto_capture.sh` was corrected to wait on wall clock after a suspend
+drifted it nine hours. It then started the capture at 07:00:08Z exactly as intended. But
+`measure_crypto_rate.py` set its own deadline from `asyncio.get_running_loop().time()`,
+which is monotonic and does not advance while the host is suspended. Measured 24 hours
+later: **9.1 hours of loop time against 24.1 hours of wall clock**, so the host had been
+suspended for about 15 hours and the run needed nearly 15 more hours of loop time to
+finish. It would have run for days and still produced a day with a hole in it.
+
+**Two further defects surfaced with it**, both of which made the failure worse than it
+needed to be.
+
+*No coverage record.* Counts were kept per UTC hour with no record of how long the socket
+was actually connected during each, so an hour observed for ten minutes is
+indistinguishable from a quiet hour. An outage understates the rate instead of appearing
+as a gap, which is precisely the shape of error that gets averaged into a conclusion.
+
+*No incremental persistence.* The summary was written only on completion, so stopping the
+drifted run discarded every hour it had collected. A measurement that runs for a day and
+persists nothing until the end has made its own interruption maximally expensive.
+
+**The fixes.** Deadline against wall clock. Per hour coverage in seconds, with rates
+computed per covered second rather than per elapsed second, so a partial hour reports the
+rate it actually saw and its coverage beside it. Summary written every five minutes.
+Reconnect log lines now carry timestamps, because the previous log recorded 43 reconnects
+and no times, so the outage could not be located from it.
+
+**The lesson that generalises past this script.** The first fix was applied where the
+defect was found rather than everywhere the defect class applies. A launcher that starts
+on time and a run that measures its own duration on a clock that stops are the same bug in
+two places, and fixing one made the system look correct while leaving the failure intact.
+When a defect class is named, the question is which other code makes the same assumption,
+not whether the reported instance is repaired.
+
+The general form applies directly to the two places already flagged: phase 5's
+reconciliation loop and phase 7's paper run must both measure elapsed wall clock rather
+than count iterations or trust a monotonic timer, and this is now the second piece of
+evidence that the distinction is not theoretical on this host.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited
