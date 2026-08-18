@@ -189,6 +189,86 @@ class RedisSettings(_Section):
 
 
 @final
+class InstrumentRef(_Section):
+    """One instrument this system records, named in every vocabulary it needs.
+
+    Attributes:
+        venue: Which live venue publishes it.
+        venue_symbol: How that venue spells it on the wire.
+        symbol: The canonical symbol, which is what the rest of the system uses.
+        historical_source: Feed that can supply history for this instrument, if any.
+            **Absence is meaningful and is what makes a gap permanent.** Bybit
+            publishes no historical quote data at all, so a crypto gap cannot be
+            repaired and the only honest response is to record it. A forex instrument
+            names its feed here and its gaps are repairable by backfill.
+        historical_symbol: How the historical feed spells it, which is not always how
+            the live venue does.
+    """
+
+    venue: NonEmptyStr
+    venue_symbol: NonEmptyStr
+    symbol: NonEmptyStr
+    historical_source: str | None = None
+    historical_symbol: str | None = None
+
+    @model_validator(mode="after")
+    def _history_is_named_completely(self) -> Self:
+        """Half a historical feed is worse than none.
+
+        A source without a symbol cannot be fetched, and a symbol without a source has
+        nothing to fetch it from. Either would leave a gap looking repairable while no
+        backfill could ever be queued for it, which is the failure mode this whole
+        section exists to make visible.
+        """
+        if (self.historical_source is None) != (self.historical_symbol is None):
+            raise ValueError(
+                f"{self.symbol}: historical_source and historical_symbol must be given "
+                f"together or not at all, got {self.historical_source!r} and "
+                f"{self.historical_symbol!r}. One without the other makes a gap look "
+                f"repairable when nothing can repair it"
+            )
+        return self
+
+
+class UniverseSettings(_Section):
+    """Every instrument this system records.
+
+    **This is the only place the universe is written.** Scripts read it from here rather
+    than carrying their own lists, because a symbol list that exists in configuration and
+    again in a script is two definitions of one thing and they drift.
+
+    Nothing here says what may be traded. Tradeability is arithmetic against live venue
+    metadata, evaluated by the eligibility screen, so that an instrument becomes
+    tradeable when the account can afford it rather than when someone edits a flag.
+    """
+
+    instruments: tuple[InstrumentRef, ...]
+
+    @model_validator(mode="after")
+    def _no_duplicates(self) -> Self:
+        canonical = [ref.symbol for ref in self.instruments]
+        if len(set(canonical)) != len(canonical):
+            raise ValueError(f"the universe lists a symbol twice: {sorted(canonical)}")
+        per_venue = [(ref.venue, ref.venue_symbol) for ref in self.instruments]
+        if len(set(per_venue)) != len(per_venue):
+            raise ValueError(f"the universe lists a venue symbol twice: {sorted(per_venue)}")
+        if not self.instruments:
+            raise ValueError("the universe is empty, so this process would record nothing")
+        return self
+
+    def for_venue(self, venue: str) -> tuple[InstrumentRef, ...]:
+        """Every instrument published by ``venue``."""
+        return tuple(ref for ref in self.instruments if ref.venue == venue)
+
+    def venue_symbols(self, venue: str) -> tuple[str, ...]:
+        """Venue symbols for ``venue``, as that venue spells them."""
+        return tuple(ref.venue_symbol for ref in self.for_venue(venue))
+
+    def with_history(self) -> tuple[InstrumentRef, ...]:
+        """Every instrument whose gaps can be repaired from a historical feed."""
+        return tuple(ref for ref in self.instruments if ref.historical_source is not None)
+
+
 class IngestSettings(_Section):
     """Intervals and stall deadlines for the ingest process.
 
@@ -710,6 +790,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings
     redis: RedisSettings
     observability: ObservabilitySettings
+    universe: UniverseSettings
     ingest: IngestSettings
     venues: VenuesSettings = Field(default_factory=VenuesSettings)
 

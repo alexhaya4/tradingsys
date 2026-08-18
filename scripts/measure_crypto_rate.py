@@ -33,8 +33,21 @@ from typing import Any
 
 import websockets
 
+from tradingsys.config import load_settings
+
 DEFAULT_URL = "wss://stream.bybit.com/v5/public/linear"
-DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT")
+
+
+def default_symbols() -> tuple[str, ...]:
+    """The crypto universe, read from configuration.
+
+    Not a literal here. The universe has exactly one definition, in config/base.toml,
+    so a capture cannot silently measure a different set of instruments than the
+    recorder records.
+    """
+    return load_settings().universe.venue_symbols("bybit")
+
+
 RECEIVE_TIMEOUT_SECONDS = 30.0
 PING_INTERVAL_SECONDS = 20.0
 
@@ -43,7 +56,7 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hours", type=float, default=24.0, help="how long to count for")
     parser.add_argument("--url", default=DEFAULT_URL)
-    parser.add_argument("--symbols", nargs="+", default=list(DEFAULT_SYMBOLS))
+    parser.add_argument("--symbols", nargs="+", default=list(default_symbols()))
     parser.add_argument("--out", type=Path, required=True, help="where to write the summary")
     return parser.parse_args(argv)
 

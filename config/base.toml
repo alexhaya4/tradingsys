@@ -45,6 +45,60 @@ ready_path = "/ready"
 metrics_path = "/metrics"
 readiness_timeout_seconds = 3.0
 
+# The instrument universe. THIS IS THE ONLY PLACE IT IS WRITTEN: scripts read it from
+# here rather than carrying their own lists, because a symbol list in configuration and
+# again in a script is two definitions of one thing and they drift.
+#
+# Nothing here says what may be traded. Tradeability is arithmetic against live venue
+# metadata, evaluated by the eligibility screen. BTC/USDT is recorded and not traded
+# because its 0.001 step is 31 percent of a 1 percent risk budget at 200 USD, and no
+# forex pair is tradeable at 200 USD because every one has a 1000 unit minimum. Both are
+# verdicts the screen reaches, not flags set here, so both reverse on their own when the
+# balance supports them.
+#
+# WHAT BREAKS IF historical_source IS REMOVED: gaps for that instrument stop being
+# repairable and start being recorded as permanent. Bybit publishes no historical quote
+# data at all, which is why the crypto entries have no historical feed and why crypto
+# spread history begins when the recorder starts and cannot be recovered later.
+
+[[universe.instruments]]
+venue = "bybit"
+venue_symbol = "ETHUSDT"
+symbol = "ETH/USDT"
+
+[[universe.instruments]]
+venue = "bybit"
+venue_symbol = "BTCUSDT"
+symbol = "BTC/USDT"
+
+[[universe.instruments]]
+venue = "ctrader"
+venue_symbol = "EURUSD"
+symbol = "EUR/USD"
+historical_source = "dukascopy"
+historical_symbol = "EURUSD"
+
+[[universe.instruments]]
+venue = "ctrader"
+venue_symbol = "GBPUSD"
+symbol = "GBP/USD"
+historical_source = "dukascopy"
+historical_symbol = "GBPUSD"
+
+[[universe.instruments]]
+venue = "ctrader"
+venue_symbol = "USDJPY"
+symbol = "USD/JPY"
+historical_source = "dukascopy"
+historical_symbol = "USDJPY"
+
+[[universe.instruments]]
+venue = "ctrader"
+venue_symbol = "AUDUSD"
+symbol = "AUD/USD"
+historical_source = "dukascopy"
+historical_symbol = "AUDUSD"
+
 [ingest]
 # Intervals and stall deadlines for the ingest process. Every deadline is compared
 # against the wall clock by the supervisor, never counted by a loop, for the reason in

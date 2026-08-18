@@ -61,6 +61,18 @@ ready_path = "/ready"
 metrics_path = "/metrics"
 readiness_timeout_seconds = 3.0
 
+[[universe.instruments]]
+venue = "bybit"
+venue_symbol = "ETHUSDT"
+symbol = "ETH/USDT"
+
+[[universe.instruments]]
+venue = "ctrader"
+venue_symbol = "EURUSD"
+symbol = "EUR/USD"
+historical_source = "dukascopy"
+historical_symbol = "EURUSD"
+
 [ingest]
 registry_interval_seconds = 21600.0
 registry_deadline_seconds = 25200.0

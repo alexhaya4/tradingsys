@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final
 
+from tradingsys.config import load_settings
 from tradingsys.config.settings import ForexVenueSettings, VenueEnvironment
 from tradingsys.core.currency import default_registry
 from tradingsys.core.money import Money
@@ -67,7 +68,16 @@ why it is asserted below: a five digit EUR/USD and a three digit USD/JPY both ar
 this same scale, and reading either against the wrong one is a factor of a hundred.
 """
 
-FX_SYMBOLS: Final = ("EURUSD", "GBPUSD", "USDJPY", "AUDUSD")
+
+def fx_symbols() -> tuple[str, ...]:
+    """The forex universe, read from configuration.
+
+    Not a literal here. A symbol list that exists in config and again in a script is two
+    definitions of one thing, and they drift; the same shape of error nearly cost the
+    database mount on the recorder host.
+    """
+    return load_settings().universe.venue_symbols("ctrader")
+
 
 ACCOUNT_EQUITY: Final = Decimal("200")
 RISK_FRACTION: Final = Decimal("0.01")
@@ -275,7 +285,7 @@ async def run() -> int:
             f"deposit asset is {deposit_asset}, so every risk figure needs a stated rate",
         )
 
-        for name in FX_SYMBOLS:
+        for name in fx_symbols():
             present = name in catalogue.names()
             report.check(f"{name} is listed on this account", present)
             if not present:

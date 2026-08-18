@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Final
 
 import httpx
 
+from tradingsys.config import load_settings
 from tradingsys.marketdata.backfill import HttpHourFetcher
 from tradingsys.marketdata.dukascopy import decode_hour, hour_url
 
@@ -38,7 +39,22 @@ if TYPE_CHECKING:
 
     from tradingsys.marketdata.dukascopy import DukascopyTick
 
-SYMBOL: Final = "EURUSD"
+
+def default_symbol() -> str:
+    """The first forex instrument with a historical feed, from configuration.
+
+    This cross check reads Dukascopy, so the instrument has to be one configuration says
+    has a historical source. Taking it from the universe rather than naming it here keeps
+    one definition of what this system covers.
+    """
+    with_history = load_settings().universe.with_history()
+    if not with_history:
+        raise SystemExit("no instrument in the universe has a historical source configured")
+    symbol = with_history[0].historical_symbol
+    assert symbol is not None  # guaranteed by InstrumentRef validation
+    return symbol
+
+
 DIGITS: Final = 5
 PIP: Final = Decimal("0.0001")
 
@@ -104,14 +120,14 @@ async def main() -> int:
                 # refuses rather than recording as an empty hour. Spacing the requests
                 # is cheaper than retrying them.
                 await asyncio.sleep(POLITE_DELAY_SECONDS)
-            payload = await fetch_with_retry(fetcher, hour_url(SYMBOL, hour))
+            payload = await fetch_with_retry(fetcher, hour_url(default_symbol(), hour))
             if payload is None:
                 print(f"{label}: the feed holds nothing for {hour.isoformat()}")
                 return 1
             decoded[label] = decode_hour(payload, hour=hour, digits=DIGITS)
             print(f"{label}: {len(decoded[label])} ticks from {hour.isoformat()}")
 
-        print(f"\n{SYMBOL} spread in pips, Dukascopy, research only")
+        print(f"\n{default_symbol()} spread in pips, Dukascopy, research only")
         print(f"{'window':<22}{'ticks':>9}{'median':>10}{'mean':>10}{'p95':>10}{'max':>10}")
 
         quiet_median = summarise("quiet hour 11:00", decoded["quiet 11:00"])
