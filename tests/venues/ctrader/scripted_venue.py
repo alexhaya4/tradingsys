@@ -34,12 +34,20 @@ from tradingsys.venues.ctrader.messages.OpenApiMessages_pb2 import (
     ProtoOAAccountAuthReq,
     ProtoOAAccountAuthRes,
     ProtoOAApplicationAuthRes,
+    ProtoOAAssetListRes,
     ProtoOAErrorRes,
     ProtoOAGetAccountListByAccessTokenRes,
+    ProtoOASymbolByIdReq,
+    ProtoOASymbolByIdRes,
+    ProtoOASymbolsListRes,
+)
+from tradingsys.venues.ctrader.messages.OpenApiModelMessages_pb2 import (
+    ProtoOALightSymbol,
+    ProtoOASymbol,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 APPLICATION_AUTH_REQ: Final = 2100
 APPLICATION_AUTH_RES: Final = 2101
@@ -50,6 +58,12 @@ CLIENT_DISCONNECT_EVENT: Final = 2148
 GET_ACCOUNTS_REQ: Final = 2149
 GET_ACCOUNTS_RES: Final = 2150
 HEARTBEAT_PAYLOAD_TYPE: Final = 51
+ASSET_LIST_REQ: Final = 2112
+ASSET_LIST_RES: Final = 2113
+SYMBOLS_LIST_REQ: Final = 2114
+SYMBOLS_LIST_RES: Final = 2115
+SYMBOL_BY_ID_REQ: Final = 2116
+SYMBOL_BY_ID_RES: Final = 2117
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +86,11 @@ class ScriptedVenue:
 
     Attributes:
         accounts: What the account list request returns.
+        assets: Asset id to name, as the venue publishes them.
+        light_symbols: The lightweight symbol records the catalogue lists.
+        full_symbols: Symbol id to full definition, for the by-id lookup. A symbol
+            absent here is absent from the venue's reply, which is the case the client
+            must refuse rather than read as an empty definition.
         application_auth_error: Error code to answer application auth with, if any.
         answer_application_auth: When false, the venue stays silent, which is how a
             read deadline is exercised.
@@ -83,6 +102,12 @@ class ScriptedVenue:
     application_auth_error: str | None = None
     answer_application_auth: bool = True
     fail_write_after: int | None = None
+
+    # The catalogue. Empty by default so that transport tests are unaffected: a venue
+    # that lists nothing is a venue the handshake tests never ask about symbols.
+    assets: Mapping[int, str] = field(default_factory=dict)
+    light_symbols: Sequence[ProtoOALightSymbol] = ()
+    full_symbols: Mapping[int, ProtoOASymbol] = field(default_factory=dict)
 
     received_payload_types: list[int] = field(default_factory=list)
     heartbeats_received: int = 0
@@ -129,16 +154,24 @@ class ScriptedVenue:
             self.heartbeats_received += 1
             return
 
+        if self._respond_to_handshake(envelope, client_msg_id):
+            return
+        if self._respond_to_catalogue(envelope.payloadType, envelope, client_msg_id):
+            return
+        self._push_error("UNSUPPORTED_MESSAGE", client_msg_id)
+
+    def _respond_to_handshake(self, envelope: ProtoMessage, client_msg_id: str | None) -> bool:
+        """Answer the three handshake requests. Returns whether it handled the message."""
         if envelope.payloadType == APPLICATION_AUTH_REQ:
             if not self.answer_application_auth:
-                return
+                return True
             if self.application_auth_error is not None:
                 self._push_error(self.application_auth_error, client_msg_id)
-                return
+                return True
             self.push(
                 envelope_for(APPLICATION_AUTH_RES, ProtoOAApplicationAuthRes(), client_msg_id)
             )
-            return
+            return True
 
         if envelope.payloadType == GET_ACCOUNTS_REQ:
             listing = ProtoOAGetAccountListByAccessTokenRes()
@@ -150,7 +183,7 @@ class ScriptedVenue:
                 if account.is_live is not None:
                     entry.isLive = account.is_live
             self.push(envelope_for(GET_ACCOUNTS_RES, listing, client_msg_id))
-            return
+            return True
 
         if envelope.payloadType == ACCOUNT_AUTH_REQ:
             request = ProtoOAAccountAuthReq()
@@ -158,9 +191,52 @@ class ScriptedVenue:
             confirmation = ProtoOAAccountAuthRes()
             confirmation.ctidTraderAccountId = request.ctidTraderAccountId
             self.push(envelope_for(ACCOUNT_AUTH_RES, confirmation, client_msg_id))
-            return
+            return True
 
-        self._push_error("UNSUPPORTED_MESSAGE", client_msg_id)
+        return False
+
+    def _respond_to_catalogue(
+        self, payload_type: int, envelope: ProtoMessage, client_msg_id: str | None
+    ) -> bool:
+        """Answer the three catalogue requests. Returns whether it handled the message.
+
+        Split out of :meth:`_respond_to` because the handshake and the catalogue are
+        separate conversations with the venue, and keeping them in one method made the
+        branch count say so.
+        """
+        if payload_type == ASSET_LIST_REQ:
+            asset_listing = ProtoOAAssetListRes()
+            asset_listing.ctidTraderAccountId = self.accounts[0].ctid_trader_account_id
+            for asset_id, name in self.assets.items():
+                asset = asset_listing.asset.add()
+                asset.assetId = asset_id
+                asset.name = name
+            self.push(envelope_for(ASSET_LIST_RES, asset_listing, client_msg_id))
+            return True
+
+        if payload_type == SYMBOLS_LIST_REQ:
+            symbols = ProtoOASymbolsListRes()
+            symbols.ctidTraderAccountId = self.accounts[0].ctid_trader_account_id
+            symbols.symbol.extend(self.light_symbols)
+            self.push(envelope_for(SYMBOLS_LIST_RES, symbols, client_msg_id))
+            return True
+
+        if payload_type == SYMBOL_BY_ID_REQ:
+            by_id = ProtoOASymbolByIdReq()
+            parse_payload(envelope, by_id)
+            answer = ProtoOASymbolByIdRes()
+            answer.ctidTraderAccountId = self.accounts[0].ctid_trader_account_id
+            for wanted in by_id.symbolId:
+                # The venue answers with what it has. A symbol it does not know is
+                # simply absent from the reply, which is the case the client has to
+                # refuse rather than read as an empty definition.
+                full = self.full_symbols.get(wanted)
+                if full is not None:
+                    answer.symbol.append(full)
+            self.push(envelope_for(SYMBOL_BY_ID_RES, answer, client_msg_id))
+            return True
+
+        return False
 
     def _push_error(self, code: str, client_msg_id: str | None) -> None:
         error = ProtoOAErrorRes()

@@ -38,23 +38,31 @@ fstab entry for the same path.
 Create the droplet with `deploy/provision/cloud-init.yaml` pasted into the **User data**
 field, after replacing the SSH public key placeholder. Attach the volume to the droplet.
 
-**Volume sizing, and why the current 20 GB is a first interval rather than a final
-answer.** At the measured 243.81 bytes per uncompressed tick row and 21.90 compressed,
-and respecting the 80 percent Postgres operating limit, a 20 GB volume holds:
+**Volume sizing.** The volume was resized from 20 GB to 60 GB on 2026-08-19, online and
+without downtime: `xfs_growfs` took the filesystem from 5,242,880 to 15,728,640 blocks and
+`df` reports 60G with 59G available. **Read the table below against 60 GB.**
 
-| Combined rate | Runway on 20 GB | Volume for a full 24 months |
+At the measured 243.81 bytes per uncompressed tick row and 21.90 compressed, and
+respecting the 80 percent Postgres operating limit, 48 GB is available and 42.66 GB of it
+is left for ticks once WAL, one minute bars and the Postgres baseline are subtracted.
+Everything in that list lives inside PGDATA and therefore on this volume; the Docker
+images do not, and sit on the droplet's own 80 GB disk.
+
+| Combined rate | Runway on 60 GB | Volume for a full 24 months |
 |---|---|---|
-| 20/s | 11.6 months | 38 GB |
-| 30/s | 6.9 months | 57 GB |
-| 40/s | 4.6 months | 76 GB |
-| 60/s | 2.3 months | 114 GB |
-| 80/s | 1.1 months | 152 GB |
+| 20/s | 34.7 months | 45 GB |
+| 30/s | 22.4 months | 64 GB |
+| 40/s | 16.2 months | 82 GB |
+| 60/s | 10.0 months | 120 GB |
+| 80/s | 6.9 months | 158 GB |
 
-The rate is unmeasured until the weekday capture lands, which is why the volume was not
-sized to a guess. DigitalOcean volumes resize upward online at 0.10 USD per GB per month,
-so growing to 76 GB costs about 7.58 USD a month and is done without downtime. That is
-the escape hatch working as designed. What it does mean is that **the volume needs a
-decision within a few months of the recorder starting, not within two years.**
+The rate is unmeasured until the weekday capture lands. 60 GB covers the capture, the 72
+hour run and phase 3 without a decision in the middle of any of them, which is what it was
+bought for. If the measured p95 rate lands above about 30 per second, the choice at that
+point is between growing the volume again and shortening retention, and both are to be
+priced then rather than defaulted into. Volumes grow online and never shrink.
+
+**Monthly cost: 30 USD.** 24 for the droplet, 6 for the 60 GB volume at 0.10 per GB.
 
 ## 2. Get the repository onto the host
 
@@ -225,9 +233,10 @@ Recorded so that a session that did not create it does not have to infer it.
 | Region | DigitalOcean SGP1, Singapore |
 | Image | Ubuntu 24.04 |
 | Droplet | 2 vCPU, 4 GB RAM, 80 GB disk |
-| Volume | 20 GB, XFS |
+| Volume | 60 GB, XFS. Resized from 20 GB on 2026-08-19 |
 | Volume mount | `/mnt/tradingsys_db`, owned by `mnt-tradingsys_db.mount` |
 | fstab entry | None, deliberately. See step 1 |
+| Monthly cost | 30 USD: 24 droplet, 6 volume |
 
 The filesystem is XFS rather than ext4, which is what DigitalOcean's automatic format
 produces. It makes no difference to anything here: `bootstrap.sh` no longer formats, and
