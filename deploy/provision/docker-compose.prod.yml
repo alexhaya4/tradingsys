@@ -1,0 +1,69 @@
+# Production overlay. Applied on top of docker-compose.yml, never instead of it:
+#
+#     docker compose -f docker-compose.yml -f deploy/provision/docker-compose.prod.yml up -d
+#
+# The base file is the development stack and stays authoritative for what the services
+# are. This file changes only what must differ on a host that runs unattended.
+#
+# WHAT BREAKS IF THIS CHANGES: db_data is bound to the block storage volume here. If the
+# bind is removed, Postgres silently starts writing to the droplet's root disk instead,
+# which is smaller, is not the volume the retention arithmetic was done against, and
+# cannot be resized online. That failure is silent, which is why the systemd unit also
+# refuses to start when the mount is absent.
+
+services:
+  app:
+    environment:
+      TRADINGSYS_APP__ENVIRONMENT: production
+    # Bounded so one crashing container cannot fill the volume with logs. journald keeps
+    # the recent history; the audit log in Postgres is the durable record.
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  db:
+    command:
+      - postgres
+      - -c
+      - timezone=UTC
+      - -c
+      - max_connections=100
+      # Sized for a 4 GB host. shared_buffers at 25 percent of RAM is the conventional
+      # starting point; effective_cache_size tells the planner what the OS page cache
+      # is likely holding, which on this workload is the active chunk's indexes.
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - effective_cache_size=2GB
+      - -c
+      - maintenance_work_mem=256MB
+      # The daily compression job rewrites a whole chunk. A larger WAL between
+      # checkpoints keeps that from checkpointing repeatedly mid-job.
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - min_wal_size=1GB
+    logging: *logging
+
+  redis:
+    logging: *logging
+
+  prometheus:
+    logging: *logging
+
+  grafana:
+    logging: *logging
+
+volumes:
+  # db_data lives on the attached block storage volume rather than on the droplet disk.
+  # TRADINGSYS_DATA_ROOT is exported by the systemd unit and by bootstrap.sh; there is
+  # deliberately no default, so a missing value fails the compose invocation loudly
+  # rather than quietly landing the database on the wrong disk.
+  db_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${TRADINGSYS_DATA_ROOT:?TRADINGSYS_DATA_ROOT must be set, see deploy/provision/RUNBOOK.md}/postgres

@@ -1,0 +1,37 @@
+# Supervision for the stack, so it survives a reboot without anyone logging in.
+#
+# Installed by deploy/provision/bootstrap.sh, which substitutes the paths. Do not edit
+# the installed copy at /etc/systemd/system: edit this file and re-run bootstrap, or the
+# host stops being reproducible from the repository, which is the whole point.
+
+[Unit]
+Description=tradingsys market data stack
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+# The correctness property this line carries: if the block storage volume is not
+# mounted, this unit does not start. Without it, Postgres would start against an empty
+# directory on the root disk and begin recording into a database that is not the one
+# holding our history, and nothing would report an error. A refusal to start is loud;
+# writing to the wrong disk is not.
+RequiresMountsFor=__DATA_ROOT__
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=__REPO_ROOT__
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+
+Environment=TRADINGSYS_DATA_ROOT=__DATA_ROOT__
+EnvironmentFile=__REPO_ROOT__/.env
+
+ExecStart=/usr/bin/docker compose -f docker-compose.yml -f deploy/provision/docker-compose.prod.yml up -d --build
+ExecStop=/usr/bin/docker compose -f docker-compose.yml -f deploy/provision/docker-compose.prod.yml down
+
+# A build on 2 vCPU can take several minutes on a cold cache.
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

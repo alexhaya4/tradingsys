@@ -889,6 +889,102 @@ supports, in a file whose whole purpose is to be trusted by a session that canno
 everything. The rule that follows is that a status line is a claim about an observation,
 and the observation is named in the row or the row does not say Complete.
 
+### Bybit is fronted by CloudFront, so we never hold a connection to Asia
+
+Measured 2026-08-18, while deciding which region to deploy the recorder in.
+
+```
+stream.bybit.com  CNAME  d2mo22rbksh9yz.cloudfront.net
+api.bybit.com     CNAME  d3d4ij29qlbhtu.cloudfront.net
+via: 1.1 ...cloudfront.net (CloudFront)
+x-amz-cf-pop: NBO50-P2        (the Nairobi edge, from this host)
+```
+
+**The mechanism, which is the part worth carrying.** Both the WebSocket stream and the
+REST API are CNAMEd to CloudFront distributions. The TCP and TLS connection the recorder
+holds therefore terminates at the nearest CloudFront edge, not at Bybit's origin. The
+path splits into two legs with different risk profiles: client to edge, which carries
+public internet transit risk and is short from any region we would choose, and edge to
+origin, which carries the real distance to Bybit and runs on AWS's private backbone.
+Choosing a region moves the second leg, which is the more reliable one, and leaves the
+first leg short everywhere.
+
+**Why that answers the region question.** Three separate arguments, none of which
+depends on where the origin is:
+
+*Message loss cannot happen silently.* WebSocket runs over TCP, so a frame either
+arrives intact or the connection fails. Distance cannot produce a gap in recorded data
+without producing a visible disconnection, which moves `connections`, `failures`,
+`resyncs` and `last_error` in `StreamStats`.
+
+*Latency cannot trip the silence detector.* The stream pings every 20 seconds against a
+30 second receive timeout. The round trip difference between a London edge and a
+Singapore edge is on the order of 200 milliseconds, which the silence budget absorbs
+about 150 times over.
+
+*The reconnect gap is dominated by our own backoff.* Reconnecting costs a few round trips
+to a nearby edge, so tens of milliseconds, against a reconnect backoff of one second base
+with full jitter. Ten reconnects a day at 200 milliseconds of extra round trip is two
+seconds of gap in 86,400, which is 0.002 percent of coverage.
+
+**This reasoning is mechanism-based and not measured, and that limit is part of the
+record.** The recorder has never run from a datacenter. The only reconnect data we hold
+is 43 reconnects with 23 DNS resolution failures from this host in Kenya on WSL2, which
+measures a domestic link and not a datacenter path. Probes from here confirm only that
+this host cannot answer the question: five TCP connects to one endpoint ranged from 59 to
+305 milliseconds, so the link's own variance exceeds the difference between venues.
+
+**What would settle it.** `StreamStats` already records `connections`, `failures`,
+`resyncs`, `silence_timeouts`, `reconnect_delays` and `last_error`. The 72 hour run
+produces exactly that dataset, and running the same recorder in two regions for a week
+and comparing those counters is the experiment if the question is ever reopened.
+
+### The recorder deploys to DigitalOcean Singapore, and the region is revisitable
+
+Decided by the director on 2026-08-18.
+
+**Region is Singapore, not London.** London was specified when forex was the primary leg.
+Forex is deferred, the only recorded and traded instruments are on Bybit, and the finding
+above establishes that neither region measurably affects data quality. So the region is
+chosen for what is actually traded rather than for a leg that is not running.
+
+The justification London had for forex is weaker than it appeared in any case. Both
+cTrader Open API endpoints resolve into Oracle Cloud address space, `live.ctraderapi.com`
+at 143.47.254.136 in ORACLE-IE and `demo.ctraderapi.com` at 145.241.247.143 in
+SE-ORACLE-SE, both registered to Oracle Svenska AB. That is a cloud hosted API gateway
+and not a broker matching engine colocated at Equinix LD4, which is the assumption that
+usually motivates London for retail forex. The registration country does not establish
+which Oracle region the addresses are deployed in, and no such claim is made here.
+
+**The region decision is revisitable and costs a rebuild rather than a migration**,
+because nothing but the recorder runs there and the host is reproducible from
+`deploy/provision`. Recorded so that a later session treats it as a choice rather than as
+a constraint.
+
+**DigitalOcean over Vultr** on bandwidth enforcement. Vultr meters the transfer allowance
+hourly, so a 2 TB monthly allowance behaves as roughly 3 GB per hour and a burst triggers
+overage immediately, which is a live risk for a process holding a 24/7 stream.
+DigitalOcean bills per second with a cap at the monthly rate and applies the allowance at
+the month rather than the hour. Hetzner was cheapest by a wide margin and was excluded on
+region: its six cloud locations are Falkenstein, Nuremberg, Helsinki, Ashburn, Hillsboro
+and Singapore, with no London presence.
+
+**The size is 2 vCPU, 4 GB, 80 GB, with `db_data` on a separate block storage volume from
+day one.** The volume is not for capacity today, it is so that every future expansion is
+an online resize rather than a maintenance window: moving an existing PGDATA onto a
+volume later means stopping Postgres, copying and remounting. The margin that a larger
+droplet would have bought is not needed, because on DigitalOcean a droplet resize covering
+CPU and RAM is reversible and a volume attaches and resizes freely, so being wrong about
+either costs a resize rather than a migration. Only in place disk expansion is one way,
+which is precisely what putting `db_data` on the volume avoids.
+
+**The 80 percent rule is why 80 GB is not 80 GB.** A Postgres volume should not run much
+past 80 percent full, because `compress_chunk` writes the compressed chunk before dropping
+the uncompressed one, so the daily compression job peaks above steady state, and
+autovacuum and any local dump need working room. Effective capacity is therefore about
+64 GB, which at the measured 243.81 and 21.90 bytes per tick row carries about 22 months
+at a 40 per second combined rate rather than the full 24.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited
