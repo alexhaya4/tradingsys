@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from tradingsys.persistence.audit import AuditLog
     from tradingsys.persistence.database import Database
     from tradingsys.persistence.repositories import InstrumentRepository, MarketDataRepository
+    from tradingsys.venues.bybit.stream import Connect
 
 __all__ = ["AssembledIngest", "assemble_ingest"]
 
@@ -99,11 +100,19 @@ async def assemble_ingest(
     market_data: MarketDataRepository,
     audit_log: AuditLog,
     currencies: CurrencyRegistry,
+    connect: Connect | None = None,
 ) -> AssembledIngest:
     """Build the ingest process for this deployment.
 
     Requires a connected database: instrument row ids are read from it, and a recorder
     without them would count every quote as an unknown instrument and write nothing.
+
+    Args:
+        connect: Opens the crypto stream's socket. Defaults to a real connection. It is
+            injectable for the same reason `BybitPublicStream` already takes it: the
+            wiring from socket to stored row is the half of the risk that construction
+            alone does not cover, and exercising it against a scripted peer keeps that
+            test off the network and out of CI's dependencies.
 
     Raises:
         InstrumentNotFoundError: An instrument in the configured universe has never been
@@ -152,7 +161,7 @@ async def assemble_ingest(
     stream = BybitPublicStream(
         f"{crypto.ws_public_url}/{CRYPTO_CATEGORY}",
         symbols,
-        connect=websockets.connect,
+        connect=connect if connect is not None else websockets.connect,
         ping_interval_seconds=crypto.ws_ping_interval_seconds,
         receive_timeout_seconds=crypto.ws_receive_timeout_seconds,
     )

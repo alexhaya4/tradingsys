@@ -21,15 +21,24 @@ from pydantic import ValidationError
 
 from tradingsys.config import Environment, Settings, load_settings
 from tradingsys.config.loader import missing_variables
+from tradingsys.core.clock import SystemClock
+from tradingsys.core.currency import default_registry
 from tradingsys.core.errors import ConfigurationError
 from tradingsys.observability.correlation import clear_correlation_id
 from tradingsys.observability.logging import reset_logging
+from tradingsys.persistence.audit import AuditLog
+from tradingsys.persistence.database import Database
+from tradingsys.persistence.repositories import InstrumentRepository, MarketDataRepository
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import AsyncIterator, Iterator
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = REPO_ROOT / "config"
+
+
+REQUIRED_TABLES = ("instruments", "ohlcv_bars", "ticks", "audit_log")
+"""Tables the integration suite cannot run without."""
 
 
 @pytest.fixture(autouse=True)
@@ -116,3 +125,73 @@ def _configuration_help(error: ConfigurationError) -> str:
             "    scripts/verify.sh",
         ]
     return "\n".join(lines)
+
+
+# Moved here from tests/persistence/conftest.py on 2026-08-19. The app integration tests
+# need the same connected database and repositories, and this file's own docstring
+# already anticipated that: defining them once means a missing credential is reported in
+# one voice rather than once per suite.
+@pytest.fixture
+async def database(live_settings: Settings) -> AsyncIterator[Database]:
+    """A connected pool against the test database.
+
+    Fails with an actionable message if the database is not running or the migrations
+    have not been applied, rather than skipping.
+    """
+    db = Database(live_settings.database)
+    try:
+        await db.connect()
+    except Exception as exc:  # the message matters more than the type
+        pytest.fail(
+            f"integration tests need PostgreSQL at {live_settings.database.dsn()}: {exc}\n"
+            f"Start it with: scripts/verify.sh"
+        )
+    try:
+        missing = [
+            table
+            for table in REQUIRED_TABLES
+            if not await db.fetchval("SELECT to_regclass($1) IS NOT NULL", table)
+        ]
+        if missing:
+            pytest.fail(
+                f"the test database is missing {', '.join(missing)}. Apply the migrations "
+                f"with: scripts/verify.sh, or directly with "
+                f"TRADINGSYS_APP__ENVIRONMENT=test uv run alembic upgrade head"
+            )
+        await _truncate(db)
+        yield db
+    finally:
+        await db.close()
+
+
+async def _truncate(database: Database) -> None:
+    """Empty every table before a test.
+
+    audit_log rejects DELETE by trigger and TRUNCATE by privilege, so the trigger is
+    dropped and recreated around the truncation. This is the one place allowed to do
+    that, and it exists so each test starts from an empty chain.
+    """
+    async with database.transaction() as connection:
+        await connection.execute("DROP TRIGGER IF EXISTS audit_log_is_append_only ON audit_log")
+        await connection.execute("TRUNCATE audit_log")
+        await connection.execute(
+            "CREATE TRIGGER audit_log_is_append_only "
+            "BEFORE UPDATE OR DELETE ON audit_log "
+            "FOR EACH ROW EXECUTE FUNCTION reject_audit_log_mutation()"
+        )
+        await connection.execute("TRUNCATE ticks, ohlcv_bars, instruments CASCADE")
+
+
+@pytest.fixture
+def audit_log(database: Database) -> AuditLog:
+    return AuditLog(database, SystemClock())
+
+
+@pytest.fixture
+def instruments(database: Database) -> InstrumentRepository:
+    return InstrumentRepository(database, default_registry)
+
+
+@pytest.fixture
+def market_data(database: Database) -> MarketDataRepository:
+    return MarketDataRepository(database)

@@ -1146,6 +1146,45 @@ It would also make the two disagreeable. The screen would say eligible and the f
 say no, or the reverse, and there is no principled way to resolve that: one of them is
 measuring the venue and the other is recording an opinion.
 
+### Fourth instance: a type annotation is not a check when nothing calls it
+
+Found 2026-08-19 while wiring the assembly, and recorded as a fourth instance of the
+unreached component class after `app/ingest.py`, `venues/ctrader/source.py` and the
+Bybit instrument mapping.
+
+**What happened.** `ProgressCheck` was written to be registered on the readiness
+registry. `HealthRegistry.register` accepts a `HealthCheck`, which requires a `name`
+property and a `check()` returning a `CheckResult`. `ProgressCheck` had neither: it was
+a callable returning a bare `tuple[bool, str]`. It could never have been registered, and
+that was not discovered for two days because nothing ever tried.
+
+**Why the type checker did not catch it.** `mypy --strict` passed throughout. It had
+nothing to compare: no call site passed a `ProgressCheck` to `register`, so no
+assignment of the wrong type to the right parameter ever existed to be checked. A type
+annotation constrains the code that uses it, and code nobody uses is unconstrained no
+matter how carefully it is annotated. **The type checker verifies relationships between
+call sites, and an uncalled component has none.**
+
+Its own test did not catch it either, for the reason already recorded under pinning
+definitions: the test called it the way its author believed it would be called, so it
+asserted the tuple interface the implementation happened to have.
+
+**The rule, which is the same rule sharpened.** Static typing does not substitute for
+reachability. A component is complete when something that runs constructs it, and the
+`--strict` badge on an unreached module is evidence about its internal consistency and
+about nothing else. When a component declares that it implements an interface, the
+evidence is a call site that passes it as that interface, not a signature that resembles
+one.
+
+**The second finding from the same wiring.** The gap monitor's first draft coerced a
+venue name into a `TickSource`. That raises for any venue not in the enum, which a test
+caught at once, but the real defect was behind it: one instrument holds two series in the
+tick table, live from its broker and backfilled from Dukascopy, so the coercion would
+have measured one series while the gap was in the other and reported clean. The
+provenance to measure is now supplied by the caller. Only one source per instrument is
+examined today, which is correct while the only live stream is crypto and becomes an open
+question the moment forex records live.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited
