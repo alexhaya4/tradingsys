@@ -10,6 +10,11 @@
 set -uo pipefail
 
 DATA_ROOT="${TRADINGSYS_DATA_ROOT:-/mnt/tradingsys_db}"
+# Exported, not merely assigned. Every compose command below is a child process, and the
+# production overlay binds db_data through ${TRADINGSYS_DATA_ROOT:?...} with no default,
+# so an unexported value fails interpolation in the child and every compose based check
+# fails for a reason that has nothing to do with what it was checking.
+export TRADINGSYS_DATA_ROOT="$DATA_ROOT"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE="docker compose -f ${REPO_ROOT}/docker-compose.yml -f ${REPO_ROOT}/deploy/provision/docker-compose.prod.yml"
 FAILED=0

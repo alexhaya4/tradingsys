@@ -101,6 +101,7 @@ async def assemble_ingest(
     audit_log: AuditLog,
     currencies: CurrencyRegistry,
     connect: Connect | None = None,
+    http_client: httpx.AsyncClient | None = None,
 ) -> AssembledIngest:
     """Build the ingest process for this deployment.
 
@@ -130,7 +131,9 @@ async def assemble_ingest(
 
     rest = BybitRestClient(
         crypto.rest_url,
-        client=httpx.AsyncClient(timeout=crypto.request_timeout_seconds),
+        client=http_client
+        if http_client is not None
+        else httpx.AsyncClient(timeout=crypto.request_timeout_seconds),
         limiter=RateLimiter(crypto.max_requests_per_second),
         max_retries=crypto.max_retries,
         backoff_seconds=crypto.retry_backoff_seconds,
@@ -138,6 +141,9 @@ async def assemble_ingest(
     sources: list[InstrumentSource] = [
         BybitInstrumentSource(rest, universe.venue_symbols(CRYPTO_VENUE), currencies)
     ]
+
+    registry = RegistrySync(instruments, audit=audit_log)
+    await _seed_instruments(registry, sources)
 
     # Row ids for everything recorded live. Read once: they are surrogate keys and do
     # not change, and looking them up per quote would put a query in the hot path.
@@ -184,7 +190,7 @@ async def assemble_ingest(
     process = IngestProcess(
         IngestPlan.from_settings(settings.ingest),
         clock,
-        registry=RegistrySync(instruments, audit=audit_log),
+        registry=registry,
         sources=sources,
         recorder=recorder,
         quotes=stream.quotes,
@@ -255,3 +261,40 @@ async def _require(instruments: InstrumentRepository, venue: str, symbol: str) -
     if instrument is None:
         raise InstrumentNotFoundError(venue, symbol)
     return instrument
+
+
+async def _seed_instruments(registry: RegistrySync, sources: Sequence[InstrumentSource]) -> None:
+    """Refresh instrument definitions before anything looks one up.
+
+    **This ordering is load bearing and its absence was a startup deadlock.** The row id
+    lookup below needs stored definitions, the registry sync is what stores them, and
+    the sync used to run only as a supervised activity started after assembly had
+    already succeeded. On a fresh database assembly therefore failed, the process
+    exited, and the sync that would have fixed it never ran. It could not recover by
+    restarting, because every restart met the same empty table.
+
+    **A sync that fails is tolerated here and a missing instrument is not.** The two are
+    different failures. A venue that is briefly unreachable should not stop a process
+    that already holds definitions from an earlier run, since it can record the moment
+    the venue returns. A configured instrument that resolves to nothing afterwards is
+    fatal, and the caller raises on it, because recording quotes against an instrument
+    this system has no definition for is how every one of them becomes an unknown
+    instrument counter rather than a row.
+    """
+    for source in sources:
+        try:
+            report = await registry.sync(source)
+        except Exception as exc:
+            # Deliberately broad: any failure to reach a venue is the same decision
+            # here, and the specific type matters to the log rather than to the branch.
+            logger.warning(
+                "initial registry sync failed, falling back to stored definitions",
+                venue=source.venue,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        else:
+            logger.info(
+                "initial registry sync complete",
+                venue=source.venue,
+                summary=report.summary(),
+            )

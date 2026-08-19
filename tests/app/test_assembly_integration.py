@@ -21,8 +21,10 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+import httpx
 import pytest
 
 from tests.factories import USDT
@@ -38,7 +40,7 @@ from tradingsys.core.schedule import TradingSchedule
 from tradingsys.observability.health import HealthRegistry
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     from tradingsys.config.settings import Settings
     from tradingsys.persistence.audit import AuditLog
@@ -116,9 +118,26 @@ class ScriptedSocket:
         return None
 
 
-@pytest.fixture
-async def stored(instruments: InstrumentRepository) -> int:
-    return await instruments.upsert(eth_perpetual())
+def venue_responses() -> Callable[[httpx.Request], httpx.Response]:
+    """Serve instruments-info and tickers from the recorded fixtures.
+
+    The assembly performs its own registry sync, so this is what populates the
+    instruments table. The previous version of this file upserted the definition
+    directly, which constructed the precondition production cannot construct for itself
+    and is why the suite passed while the process could not start.
+    """
+    data = Path(__file__).resolve().parents[1] / "venues" / "bybit" / "data"
+    definition = json.loads((data / "instruments_linear_ETHUSDT.json").read_text())
+    ticker = json.loads((data / "tickers_linear_BTCUSDT.json").read_text())
+    for row in ticker["result"]["list"]:
+        row["symbol"] = VENUE_SYMBOL
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "instruments-info" in request.url.path:
+            return httpx.Response(200, json=definition)
+        return httpx.Response(200, json=ticker)
+
+    return handler
 
 
 @pytest.fixture
@@ -138,9 +157,7 @@ async def assembled(
     instruments: InstrumentRepository,
     market_data: MarketDataRepository,
     audit_log: AuditLog,
-    stored: int,
 ) -> AsyncIterator[tuple[AssembledIngest, ScriptedSocket, int]]:
-    del stored
     socket = ScriptedSocket([snapshot()])
 
     async def connect(_url: str) -> ScriptedSocket:
@@ -160,12 +177,62 @@ async def assembled(
         audit_log=audit_log,
         currencies=default_registry,
         connect=connect,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(venue_responses())),
     )
     try:
         yield ingest, socket, await instruments.row_id(INSTRUMENT_ID)
     finally:
         await ingest.process.stop()
         await ingest.aclose()
+
+
+class TestItStartsFromAnEmptyDatabase:
+    """The deploy failure of 2026-08-19, as a test.
+
+    Assembly resolves instrument row ids, the registry sync is what stores the
+    definitions those ids come from, and the sync used to run only as a supervised
+    activity started after assembly had already succeeded. On a fresh database assembly
+    therefore raised InstrumentNotFoundError, the process exited, and the sync that
+    would have fixed it never ran. Restarting met the same empty table, so it
+    crash-looped for four hours.
+
+    Every test in this file starts from a truncated instruments table, which is why this
+    now holds for all of them. It is stated separately because the ordering is the point
+    rather than an incidental precondition.
+    """
+
+    async def test_the_instruments_table_is_empty_before_assembly(
+        self, instruments: InstrumentRepository
+    ) -> None:
+        """Pins the precondition. Without this the rest of the file could pass on rows
+        left by an earlier run, which is how the original defect survived a green suite."""
+        assert await instruments.get(INSTRUMENT_ID) is None
+
+    async def test_assembly_populates_the_definitions_it_then_resolves(
+        self,
+        assembled: tuple[AssembledIngest, ScriptedSocket, int],
+        instruments: InstrumentRepository,
+    ) -> None:
+        del assembled
+        stored = await instruments.get(INSTRUMENT_ID)
+
+        assert stored is not None
+        assert stored.venue_symbol == VENUE_SYMBOL
+        assert stored.id.symbol == SYMBOL
+
+    async def test_the_venue_symbol_and_canonical_symbol_both_survive(
+        self,
+        assembled: tuple[AssembledIngest, ScriptedSocket, int],
+        instruments: InstrumentRepository,
+    ) -> None:
+        """The mapping the first diagnosis suspected. It was never the fault, and the
+        assertion is kept because the two spellings are easy to conflate: configuration
+        and lookups use ETH/USDT, the wire uses ETHUSDT."""
+        del assembled
+        stored = await instruments.get(InstrumentId(venue="bybit", symbol="ETH/USDT"))
+
+        assert stored is not None
+        assert stored.venue_symbol == "ETHUSDT"
 
 
 class TestItAssembles:
