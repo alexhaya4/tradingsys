@@ -1232,6 +1232,35 @@ when the check would have failed, which is exactly when it matters. The argument
 therefore carries no information about whether to skip, and the only thing that does is
 running the check.
 
+### A generated mount unit and the fstab line it came from are one definition
+
+Corrected by the director on 2026-08-19, after `bootstrap.sh` warned about a mount that
+was correct.
+
+**The false positive.** The script warned whenever `/etc/fstab` held an entry for the
+data root while a `.mount` unit existed, on the reasoning that two definitions of one
+device is how a typo silently leaves you writing to the root disk. On this host
+`systemctl show mnt-tradingsys_db.mount -p SourcePath` returns `/etc/fstab`: systemd
+**generated** the unit from the fstab line. That is one definition and its generated
+form, not two definitions competing.
+
+**Why the two hosts differ.** The volume was attached after droplet creation rather than
+during it. Attached during creation, DigitalOcean writes a real `.mount` unit and no
+fstab entry. Attached afterwards, the platform writes nothing, the operator adds fstab,
+and systemd generates the unit. Both arrangements are valid and the runbook describes
+each.
+
+**The rule.** Distinguish them by `SourcePath`, not by the presence of both. Empty means
+a real unit file, and an fstab entry beside that is genuinely two definitions.
+`/etc/fstab` means the unit is the generated form of that line.
+
+**Why this is worth a decision rather than a fix.** A warning that fires on a correct
+configuration is worse than no warning, because it is the one an operator learns to
+ignore before the real one arrives. The check was guarding something real and was
+reporting it on evidence that did not distinguish the safe case from the dangerous one,
+which is the same error as a health check that asserts existence rather than correct
+future action.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited
