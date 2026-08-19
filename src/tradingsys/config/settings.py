@@ -752,7 +752,19 @@ class VenuesSettings(_Section):
         ):
             names.append("venues.forex")
         for name, venue in self.crypto.items():
-            if venue.enabled and not venue.sandbox:
+            # Credentials, not just mainnet. This guard exists to make arming real
+            # orders a deliberate and reviewable act, and a venue with no API key and
+            # secret cannot submit an order whatever anyone intends, so demanding the
+            # arming flag for it answers a question nobody asked. Recording mainnet
+            # public market data needs no credentials and places no orders.
+            #
+            # WHAT BREAKS IF has_credentials IS DROPPED FROM THIS CONDITION: the only
+            # expressible states become "record nothing" and "armed for real orders",
+            # and the recorder deployment cannot exist. It is not an oversight.
+            #
+            # It fails closed: adding credentials to a mainnet venue restores the
+            # requirement automatically rather than depending on anyone remembering.
+            if venue.enabled and not venue.sandbox and venue.has_credentials:
                 names.append(f"venues.crypto.{name}")
         return tuple(names)
 

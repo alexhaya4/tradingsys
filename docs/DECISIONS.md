@@ -1185,6 +1185,53 @@ provenance to measure is now supplied by the caller. Only one source per instrum
 examined today, which is correct while the only live stream is crypto and becomes an open
 question the moment forex records live.
 
+### The live venue guard keys on credentials, not on mainnet
+
+Directed by the director on 2026-08-19, when enabling the recorder for production was
+refused by the guard.
+
+**What the guard means, in one line: a venue counts as trading real money when it is
+enabled, is not a sandbox, and holds the credentials that would let it submit an order.**
+
+`has_credentials` in `VenuesSettings.live_venue_names` is deliberate and is not an
+oversight to be tidied back to enabled-and-not-sandbox. The guard exists to make arming
+real orders a deliberate and reviewable act. A venue with no API key and secret cannot
+submit an order whatever anyone intends, so demanding the arming flag for it answers a
+question nobody asked, and it left only two expressible states: record nothing, or arm
+real orders. The recorder deployment is neither, and could not be configured at all.
+
+**It fails closed, which is the property that matters.** Adding credentials to a mainnet
+venue restores the requirement automatically rather than depending on anyone remembering
+to set the flag. That transition is tested in both directions from one fixture, since it
+is the direction that protects us and the one most likely to rot.
+
+`config/production.toml` therefore enables `venues.crypto.bybit` with no credentials and
+leaves `app.allow_live_trading` false. Recording mainnet public market data and arming
+orders are now different switches, which they always should have been: crypto spread
+history only accumulates forward and cannot be recovered, so recording should start as
+early as possible, while arming should stay a reviewable change.
+
+### An argument for skipping verification is worth least when the thing skipped would have failed
+
+Recorded by the director on 2026-08-19, alongside the pinning rule, because it
+generalises past the occasion.
+
+The occasion: a sequencing note said to deploy before finishing verification, on the
+grounds that every day the recorder is not running is a day of crypto history
+permanently lost. The urgency was real. The argument still failed, and on its own terms
+rather than on principle, because it assumed the deploy would succeed. Writing the
+integration test first found two defects that would have stopped it: `ProgressCheck` did
+not implement the interface the readiness registry takes, and the production
+configuration could not enable the venue at all. Recording would have started at the same
+time either way, minus whatever the local run caught, with the debugging done remotely
+against a host holding credentials and with no local reproduction.
+
+**The general form.** An urgency argument for skipping a check is strongest when the
+check would have passed, which is exactly when skipping it costs nothing. It is weakest
+when the check would have failed, which is exactly when it matters. The argument
+therefore carries no information about whether to skip, and the only thing that does is
+running the check.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited

@@ -28,5 +28,13 @@ enabled = false
 environment = "live"
 
 [venues.crypto.bybit]
-enabled = false
+# Enabled for recording. A recorder that starts and records nothing is the failure the
+# universe configuration exists to prevent, and crypto spread history only accumulates
+# forward: Bybit publishes none of it, so a day not recording is permanently lost.
+#
+# THIS ARMS NOTHING. No api_key or api_secret is set, so this venue can reach public
+# market data and metadata and cannot submit an order. app.allow_live_trading stays
+# false above, and the live venue guard keys on credentials for exactly this reason:
+# adding credentials here would require that flag again, automatically.
+enabled = true
 sandbox = false

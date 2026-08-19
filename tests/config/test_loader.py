@@ -8,7 +8,7 @@ at three in the morning, so they are asserted rather than assumed.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import pytest
 
@@ -442,6 +442,93 @@ class TestLiveTradingSafety:
                 env(**FOREX_CREDENTIALS),
             )
 
+    CRYPTO_CREDENTIALS: ClassVar[dict[str, str]] = {
+        "TRADINGSYS_VENUES__CRYPTO__BYBIT__API_KEY": "key",
+        "TRADINGSYS_VENUES__CRYPTO__BYBIT__API_SECRET": "secret",
+    }
+    """Supplied through the environment, because a secret in a TOML file is refused."""
+
+    def _crypto_config(self, config_dir: Path) -> None:
+        """A mainnet crypto venue. Whether it holds keys is decided by the environment,
+        which is the only difference between the recorder and an armed deployment."""
+        (config_dir / "production.toml").write_text(
+            '[app]\nenvironment = "production"\nallow_live_trading = false\n\n'
+            "[venues.crypto.bybit]\n"
+            "enabled = true\n"
+            'exchange_id = "bybit"\n'
+            "sandbox = false\n"
+            'mainnet_rest_url = "https://api.bybit.com"\n'
+            'testnet_rest_url = "https://api-testnet.bybit.com"\n'
+            'mainnet_ws_public_url = "wss://stream.bybit.com/v5/public"\n'
+            'testnet_ws_public_url = "wss://stream-testnet.bybit.com/v5/public"\n'
+        )
+
+    def test_a_mainnet_crypto_venue_without_credentials_needs_no_arming(
+        self, config_dir: Path
+    ) -> None:
+        """The recorder deployment. Public market data takes no credentials and can
+        place no order, so demanding the arming flag would answer a question nobody
+        asked and would leave no way to express "record and do not trade"."""
+        self._crypto_config(config_dir)
+
+        settings = load(config_dir, env(), environment=Environment.PRODUCTION)
+
+        assert settings.venues.crypto["bybit"].enabled
+        assert settings.venues.live_venue_names() == ()
+        assert settings.app.allow_live_trading is False
+
+    def test_adding_credentials_restores_the_requirement(self, config_dir: Path) -> None:
+        """The direction that protects us, and the one most likely to rot. The guard
+        fails closed: credentials appearing on a mainnet venue re-arm the requirement
+        automatically rather than depending on anyone remembering to set the flag."""
+        self._crypto_config(config_dir)
+
+        with pytest.raises(ConfigurationError, match="allow_live_trading"):
+            load(
+                config_dir,
+                env(**self.CRYPTO_CREDENTIALS),
+                environment=Environment.PRODUCTION,
+            )
+
+    def test_the_transition_is_the_only_thing_that_changed(self, config_dir: Path) -> None:
+        """Both directions from one fixture, so the pair cannot drift apart: the same
+        venue, differing only in whether it holds keys."""
+        self._crypto_config(config_dir)
+        without = load(config_dir, env(), environment=Environment.PRODUCTION)
+
+        assert without.venues.live_venue_names() == ()
+        with pytest.raises(ConfigurationError, match="real money"):
+            load(
+                config_dir,
+                env(**self.CRYPTO_CREDENTIALS),
+                environment=Environment.PRODUCTION,
+            )
+
+    def test_a_sandbox_venue_with_credentials_still_needs_no_arming(self, config_dir: Path) -> None:
+        """Testnet keys buy testnet orders, which is not what the flag protects."""
+        self._crypto_config(config_dir)
+        path = config_dir / "production.toml"
+        path.write_text(path.read_text().replace("sandbox = false", "sandbox = true"))
+
+        settings = load(config_dir, env(), environment=Environment.PRODUCTION)
+
+        assert settings.venues.live_venue_names() == ()
+
+    def test_the_shipped_production_recorder_loads_without_arming(self) -> None:
+        """Against config/ in the repository. This is the deployment itself, and it must
+        not require the flag that arms orders."""
+        settings = load_settings(
+            config_dir=REPO_CONFIG_DIR,
+            environment=Environment.PRODUCTION,
+            environ={"TRADINGSYS_DATABASE__PASSWORD": "not-a-real-password"},
+        )
+
+        assert settings.venues.crypto["bybit"].enabled
+        assert settings.venues.crypto["bybit"].sandbox is False
+        assert settings.venues.crypto["bybit"].has_credentials is False
+        assert settings.venues.live_venue_names() == ()
+        assert settings.app.allow_live_trading is False
+
     def test_an_armed_live_venue_in_production_is_accepted(self, config_dir: Path) -> None:
         self._live_config(config_dir, allow=True, environment="production")
         settings = load(
@@ -451,7 +538,12 @@ class TestLiveTradingSafety:
         )
         assert settings.venues.live_venue_names() == ("venues.forex",)
 
-    def test_a_non_sandbox_crypto_venue_counts_as_live(self, config_dir: Path) -> None:
+    def test_a_non_sandbox_crypto_venue_with_credentials_counts_as_live(
+        self, config_dir: Path
+    ) -> None:
+        """Rewritten 2026-08-19 when the guard was narrowed. It previously asserted that
+        mainnet alone was enough, which is the meaning that made the recorder
+        inexpressible. Credentials are now what make a venue capable of trading."""
         (config_dir / "base.toml").write_text(
             MINIMAL_BASE
             + """
@@ -466,7 +558,7 @@ testnet_ws_public_url = "wss://stream-testnet.bybit.com/v5/public"
 """
         )
         with pytest.raises(ConfigurationError, match=r"venues\.crypto\.bybit"):
-            load(config_dir)
+            load(config_dir, env(**self.CRYPTO_CREDENTIALS))
 
     def test_a_practice_venue_needs_no_arming(self, config_dir: Path) -> None:
         (config_dir / "base.toml").write_text(
