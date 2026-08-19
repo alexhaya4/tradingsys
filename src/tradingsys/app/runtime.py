@@ -27,6 +27,7 @@ from redis.asyncio import Redis
 from starlette.applications import Starlette
 
 from tradingsys import __version__
+from tradingsys.app.assembly import CRYPTO_VENUE, AssembledIngest, assemble_ingest
 from tradingsys.core.clock import SystemClock
 from tradingsys.core.currency import default_registry
 from tradingsys.core.errors import TradingSysError
@@ -43,8 +44,11 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from types import TracebackType
 
+    from structlog.stdlib import BoundLogger
+
     from tradingsys.config.settings import Settings
     from tradingsys.core.clock import Clock
+    from tradingsys.core.currency import CurrencyRegistry
 
 __all__ = ["Application", "run"]
 
@@ -85,7 +89,9 @@ class Application:
     instruments: InstrumentRepository
     market_data: MarketDataRepository
     readiness: HealthRegistry
+    currencies: CurrencyRegistry
     _started: bool = field(default=False, init=False)
+    _ingest: AssembledIngest | None = field(default=None, init=False)
 
     @classmethod
     def build(cls, settings: Settings, clock: Clock | None = None) -> Self:
@@ -126,6 +132,7 @@ class Application:
             instruments=InstrumentRepository(database, default_registry),
             market_data=MarketDataRepository(database),
             readiness=readiness,
+            currencies=default_registry,
         )
 
     @property
@@ -173,6 +180,8 @@ class Application:
                 payload={"version": __version__, "configuration": self.settings.describe()},
             )
             self.metrics.record_audit_entry(AuditCategory.SYSTEM.value)
+        await self._start_ingest(logger)
+
         self._started = True
         logger.info(
             "startup complete",
@@ -181,9 +190,54 @@ class Application:
             live_venues=list(self.settings.venues.live_venue_names()),
         )
 
+    async def _start_ingest(self, logger: BoundLogger) -> None:
+        """Assemble and start ingestion, if this deployment records anything.
+
+        Assembly happens here rather than in :meth:`build` because instrument row ids
+        come from the database, and a recorder without them counts every quote as an
+        unknown instrument and writes nothing.
+
+        A deployment with no enabled crypto venue starts without ingesting, which is the
+        correct behaviour for a process that only serves the operational endpoints. It
+        says so rather than appearing to record.
+        """
+        crypto = self.settings.venues.crypto.get(CRYPTO_VENUE)
+        if crypto is None or not crypto.enabled:
+            logger.info(
+                "ingestion is not enabled for this deployment, nothing will be recorded",
+                venue=CRYPTO_VENUE,
+            )
+            return
+
+        self._ingest = await assemble_ingest(
+            self.settings,
+            self.clock,
+            database=self.database,
+            instruments=self.instruments,
+            market_data=self.market_data,
+            audit_log=self.audit_log,
+            currencies=self.currencies,
+        )
+        # Registered on readiness rather than liveness: a stalled ingest should stop this
+        # process being given work and should not by itself trigger a restart, because
+        # restarting a process whose venue is down achieves nothing.
+        self.readiness.register(self._ingest.process.progress_check())
+        self._ingest.process.register_activities()
+        self._ingest.process.start()
+
     async def stop(self) -> None:
         """Close every dependency, attempting each one even if another fails."""
         logger = get_logger("app.runtime")
+        if self._ingest is not None:
+            # Before the database closes: stopping flushes the batch the recorder still
+            # holds, and a batch that was accepted and not written is data this system
+            # claimed to have recorded.
+            try:
+                await self._ingest.process.stop()
+                await self._ingest.aclose()
+            except Exception:
+                logger.exception("failed to stop ingestion cleanly")
+            self._ingest = None
         if self._started:
             try:
                 with correlation_id() as trace:

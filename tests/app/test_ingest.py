@@ -42,6 +42,8 @@ def plan(**overrides: timedelta) -> IngestPlan:
         "quote_deadline": timedelta(seconds=30),
         "registry_deadline": timedelta(hours=7),
         "backfill_deadline": timedelta(minutes=90),
+        "gap_interval": timedelta(minutes=15),
+        "gap_deadline": timedelta(minutes=30),
     }
     defaults.update(overrides)
     return IngestPlan(**defaults)
@@ -140,6 +142,19 @@ class TestPlanFromSettings:
             backfill_deadline_seconds=400.0,
             backfill_window_seconds=500.0,
             quote_deadline_seconds=600.0,
+            backfill_fetch_timeout_seconds=30.0,
+            backfill_concurrency=3,
+            backfill_max_attempts_per_hour=3,
+            backfill_backoff_seconds=1.0,
+            backfill_stale_claim_seconds=900.0,
+            recorder_batch_size=500,
+            recorder_flush_interval_seconds=5.0,
+            gap_interval_seconds=700.0,
+            gap_deadline_seconds=800.0,
+            gap_window_seconds=1000.0,
+            gap_settle_seconds=120.0,
+            gap_max_quiet_seconds=10.0,
+            gap_minimum_seconds=60.0,
         )
         built = IngestPlan.from_settings(settings)
 
@@ -149,6 +164,8 @@ class TestPlanFromSettings:
         assert built.backfill_deadline == timedelta(seconds=400)
         assert built.backfill_window == timedelta(seconds=500)
         assert built.quote_deadline == timedelta(seconds=600)
+        assert built.gap_interval == timedelta(seconds=700)
+        assert built.gap_deadline == timedelta(seconds=800)
 
 
 class TestRegisteredActivities:
@@ -255,13 +272,14 @@ class TestStallDetection:
         process.register_activities()
         process.start()
         try:
-            passed, detail = await process.progress_check()()
-            assert passed is True
+            result = await process.progress_check().check()
+            assert result.passed is True
 
             clock.advance(31)
-            passed, detail = await process.progress_check()()
-            assert passed is False
-            assert "crypto_quotes" in detail
+            result = await process.progress_check().check()
+            assert result.passed is False
+            assert result.detail is not None
+            assert "crypto_quotes" in result.detail
         finally:
             await process.stop()
 

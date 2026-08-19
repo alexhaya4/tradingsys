@@ -34,10 +34,12 @@ from tradingsys.app.supervisor import ProgressCheck, SupervisedActivity, Supervi
 from tradingsys.observability.logging import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
+    from tradingsys.app.gapcheck import GapMonitor
     from tradingsys.config.settings import IngestSettings
     from tradingsys.core.clock import Clock
+    from tradingsys.core.instrument import InstrumentId
     from tradingsys.marketdata.backfill_job import BackfillJob
     from tradingsys.marketdata.recorder import QuoteRecorder
     from tradingsys.marketdata.registry import InstrumentSource, RegistrySync
@@ -75,6 +77,8 @@ class IngestPlan:
     quote_deadline: timedelta
     registry_deadline: timedelta
     backfill_deadline: timedelta
+    gap_interval: timedelta
+    gap_deadline: timedelta
 
     @classmethod
     def from_settings(cls, settings: IngestSettings) -> IngestPlan:
@@ -92,6 +96,8 @@ class IngestPlan:
             quote_deadline=timedelta(seconds=settings.quote_deadline_seconds),
             registry_deadline=timedelta(seconds=settings.registry_deadline_seconds),
             backfill_deadline=timedelta(seconds=settings.backfill_deadline_seconds),
+            gap_interval=timedelta(seconds=settings.gap_interval_seconds),
+            gap_deadline=timedelta(seconds=settings.gap_deadline_seconds),
         )
 
 
@@ -102,10 +108,12 @@ class IngestProcess:
     __slots__ = (
         "_backfill",
         "_clock",
+        "_gaps",
         "_plan",
         "_quotes",
         "_recorder",
         "_registry",
+        "_row_ids",
         "_sources",
         "_supervisor",
     )
@@ -120,6 +128,8 @@ class IngestProcess:
         recorder: QuoteRecorder,
         quotes: Callable[[], AsyncIterator[Quote]],
         backfill: Sequence[BackfillJob] = (),
+        gaps: GapMonitor | None = None,
+        row_ids: Mapping[InstrumentId, int] | None = None,
     ) -> None:
         self._plan = plan
         self._clock = clock
@@ -128,6 +138,8 @@ class IngestProcess:
         self._recorder = recorder
         self._quotes = quotes
         self._backfill = tuple(backfill)
+        self._gaps = gaps
+        self._row_ids = dict(row_ids or {})
         self._supervisor = Supervisor(clock)
 
     @property
@@ -164,6 +176,16 @@ class IngestProcess:
                     name="dukascopy_backfill",
                     run=self._run_backfill,
                     progress_deadline=self._plan.backfill_deadline,
+                    restart_backoff=5.0,
+                    max_restart_backoff=300.0,
+                )
+            )
+        if self._gaps is not None:
+            self._supervisor.register(
+                SupervisedActivity(
+                    name="gap_detection",
+                    run=self._run_gap_detection,
+                    progress_deadline=self._plan.gap_deadline,
                     restart_backoff=5.0,
                     max_restart_backoff=300.0,
                 )
@@ -230,3 +252,24 @@ class IngestProcess:
                     )
             progress()
             await asyncio.sleep(self._plan.backfill_interval.total_seconds())
+
+    async def _run_gap_detection(self, progress: Callable[[], None]) -> None:
+        """Look for gaps on an interval, forever.
+
+        Progress is reported per completed pass rather than per gap, because finding
+        nothing is the steady state and is not a stall. A pass that finds gaps has done
+        its job exactly as much as one that does not.
+        """
+        if self._gaps is None:  # pragma: no cover - registration guards this
+            return
+        while True:
+            found = await self._gaps.run_once(self._row_ids)
+            if found:
+                logger.info(
+                    "gap detection pass found gaps",
+                    gaps=len(found),
+                    repairable=self._gaps.stats.repairable_found,
+                    permanent=self._gaps.stats.permanent_found,
+                )
+            progress()
+            await asyncio.sleep(self._plan.gap_interval.total_seconds())

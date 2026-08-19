@@ -125,6 +125,43 @@ backfill_window_seconds = 604800.0
 # seconds is ten of those, which tolerates a reconnect with its backoff.
 quote_deadline_seconds = 30.0
 
+# The recorder batches to keep the write rate off the hot path. A batch in hand is data
+# we claimed to have, so it is flushed on shutdown regardless of size.
+recorder_batch_size = 500
+recorder_flush_interval_seconds = 5.0
+
+backfill_fetch_timeout_seconds = 30.0
+# Concurrency 3 is the feed's tolerance, not ours: Dukascopy throttles harder above it.
+backfill_concurrency = 3
+backfill_max_attempts_per_hour = 3
+backfill_backoff_seconds = 1.0
+# Comfortably above the longest one hour fetch, or two workers duplicate live work.
+backfill_stale_claim_seconds = 900.0
+
+# Gap detection. SPEC section 8 makes it an exit criterion, and until 2026-08-19 the
+# capability existed as a library nothing called.
+gap_interval_seconds = 900.0
+gap_deadline_seconds = 1800.0
+
+# WHAT BREAKS IF THIS SHRINKS: it must exceed gap_deadline_seconds plus
+# gap_settle_seconds, or an absence can fall out of every window before a pass examines
+# it and is then never detected, with every pass succeeding and reporting nothing.
+gap_window_seconds = 7200.0
+
+# The trailing edge of the window is excluded because the most recent seconds are
+# indistinguishable from a quiet market until enough time has passed to tell them apart.
+# Without this every pass finds a gap at its own edge.
+gap_settle_seconds = 120.0
+
+# What separates a quiet market from a stopped feed. Bybit publishes a level one
+# snapshot at least every three seconds even when nothing changes, so ten seconds of
+# silence is the feed and not the market.
+gap_max_quiet_seconds = 10.0
+
+# Shortest absence worth reporting. Must be at least gap_max_quiet_seconds: a shorter
+# minimum would claim a sensitivity the coverage calculation cannot deliver.
+gap_minimum_seconds = 60.0
+
 [venues.forex]
 # cTrader Open API, reached through Pepperstone. See PROGRESS.md for why this is
 # cTrader rather than OANDA.

@@ -297,6 +297,19 @@ class IngestSettings(_Section):
     quote_deadline_seconds: PositiveSeconds
     registry_deadline_seconds: PositiveSeconds
     backfill_deadline_seconds: PositiveSeconds
+    backfill_fetch_timeout_seconds: PositiveSeconds
+    backfill_concurrency: Annotated[int, Field(gt=0)]
+    backfill_max_attempts_per_hour: Annotated[int, Field(gt=0)]
+    backfill_backoff_seconds: PositiveSeconds
+    backfill_stale_claim_seconds: PositiveSeconds
+    recorder_batch_size: Annotated[int, Field(gt=0)]
+    recorder_flush_interval_seconds: PositiveSeconds
+    gap_interval_seconds: PositiveSeconds
+    gap_deadline_seconds: PositiveSeconds
+    gap_window_seconds: PositiveSeconds
+    gap_settle_seconds: PositiveSeconds
+    gap_max_quiet_seconds: PositiveSeconds
+    gap_minimum_seconds: PositiveSeconds
 
     @model_validator(mode="after")
     def _deadlines_exceed_their_intervals(self) -> Self:
@@ -311,6 +324,7 @@ class IngestSettings(_Section):
         pairs = (
             ("registry", self.registry_interval_seconds, self.registry_deadline_seconds),
             ("backfill", self.backfill_interval_seconds, self.backfill_deadline_seconds),
+            ("gap", self.gap_interval_seconds, self.gap_deadline_seconds),
         )
         for name, interval, deadline in pairs:
             if deadline <= interval:
@@ -319,6 +333,38 @@ class IngestSettings(_Section):
                     f"{name}_interval_seconds ({interval}), or a healthy pass is "
                     f"reported as a stall on every cycle"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _gap_minimum_exceeds_quiet(self) -> Self:
+        """A gap shorter than the quiet threshold is not distinguishable from a lull.
+
+        Coverage treats points closer together than ``gap_max_quiet_seconds`` as one
+        continuous stretch, so an absence shorter than that never appears as a gap in
+        the first place. A minimum below it therefore promises a sensitivity the
+        coverage calculation cannot deliver, which reads as gap detection being finer
+        than it is.
+        """
+        if self.gap_minimum_seconds < self.gap_max_quiet_seconds:
+            raise ValueError(
+                f"gap_minimum_seconds ({self.gap_minimum_seconds}) must be at least "
+                f"gap_max_quiet_seconds ({self.gap_max_quiet_seconds}); a shorter "
+                f"minimum claims a sensitivity the coverage calculation does not have"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _gap_window_covers_its_interval(self) -> Self:
+        """The window has to cover the gap between passes, for the same reason the
+        backfill window does: an absence that falls out of every window before any pass
+        looks at it is never detected, and nothing reports that."""
+        if self.gap_window_seconds <= self.gap_deadline_seconds + self.gap_settle_seconds:
+            raise ValueError(
+                f"gap_window_seconds ({self.gap_window_seconds}) must exceed "
+                f"gap_deadline_seconds ({self.gap_deadline_seconds}) plus "
+                f"gap_settle_seconds ({self.gap_settle_seconds}), or an absence can "
+                f"fall out of every window before a pass examines it"
+            )
         return self
 
     @model_validator(mode="after")

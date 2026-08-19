@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, final
 
 from tradingsys.core.errors import TradingSysError
+from tradingsys.observability.health import CheckResult, HealthCheck, HealthStatus
 from tradingsys.observability.logging import get_logger
 
 if TYPE_CHECKING:
@@ -236,7 +237,7 @@ class Supervisor:
 
 
 @final
-class ProgressCheck:
+class ProgressCheck(HealthCheck):
     """A readiness check that fails when supervised work has stalled.
 
     This is the defect class made executable. It deliberately does not ask whether any
@@ -247,16 +248,23 @@ class ProgressCheck:
     Registered on readiness rather than liveness: a stalled ingest should stop the
     process being treated as ready to serve, and should not by itself trigger a restart,
     since restarting a process whose venue is down achieves nothing.
+
+    It subclasses :class:`~tradingsys.observability.health.HealthCheck` because the
+    registry takes that and nothing else. The first version returned a bare tuple and
+    was never registered anywhere, so the mismatch went unnoticed until the assembly
+    tried to use it, which is the same shape of defect as the components it supervises.
     """
 
     __slots__ = ("_supervisor",)
 
-    name = "ingest_progress"
-
     def __init__(self, supervisor: Supervisor) -> None:
         self._supervisor = supervisor
 
-    async def __call__(self) -> tuple[bool, str]:
+    @property
+    def name(self) -> str:
+        return "ingest_progress"
+
+    async def check(self) -> CheckResult:
         """Whether every activity is within its progress deadline, and the detail."""
         stalled = self._supervisor.stalled()
         states = self._supervisor.states
@@ -265,7 +273,17 @@ class ProgressCheck:
                 f"{name} last progressed {states[name].last_progress.isoformat()}"
                 for name in stalled
             )
-            return False, f"stalled: {detail}"
-        if not states:
-            return True, "no activities registered"
-        return True, f"{len(states)} activities progressing"
+            return CheckResult(
+                name=self.name,
+                status=HealthStatus.FAIL,
+                duration_seconds=0.0,
+                detail=f"stalled: {detail}",
+            )
+        return CheckResult(
+            name=self.name,
+            status=HealthStatus.PASS,
+            duration_seconds=0.0,
+            detail=(
+                f"{len(states)} activities progressing" if states else "no activities registered"
+            ),
+        )

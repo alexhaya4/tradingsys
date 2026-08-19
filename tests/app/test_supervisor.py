@@ -126,14 +126,15 @@ class TestTheStallThatRaisesNothing:
         supervisor.start()
         await asyncio.sleep(0)
 
-        healthy, detail = await ProgressCheck(supervisor)()
-        assert healthy, detail
+        result = await ProgressCheck(supervisor).check()
+        assert result.passed, result.detail
 
         clock.advance(timedelta(hours=9))
-        healthy, detail = await ProgressCheck(supervisor)()
+        result = await ProgressCheck(supervisor).check()
 
-        assert not healthy
-        assert "quotes" in detail
+        assert not result.passed
+        assert result.detail is not None
+        assert "quotes" in result.detail
         await supervisor.stop()
 
 
@@ -261,6 +262,7 @@ class TestRegistration:
             )
 
     async def test_a_supervisor_with_nothing_registered_is_healthy(self) -> None:
-        healthy, detail = await ProgressCheck(Supervisor(SteppableClock()))()
-        assert healthy
-        assert "no activities" in detail
+        result = await ProgressCheck(Supervisor(SteppableClock())).check()
+        assert result.passed
+        assert result.detail is not None
+        assert "no activities" in result.detail

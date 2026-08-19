@@ -1094,6 +1094,58 @@ a measurement script that is not run by CI.
 assembly. That is one gap rather than many, and stating it that way is the difference
 between a plan and a list.
 
+### Where a rule is expressed twice, pin the definitions against each other on real data
+
+Directed by the director on 2026-08-19, after the coverage defect. The finding was not
+the bug.
+
+**What happened.** `coverage_from_timestamps` had 40 passing tests and had never been
+called with real data. It filtered zero width intervals unless every interval was zero
+width, so a lone tick on its own survived and a lone tick between two busy stretches
+vanished: the reconnect case exactly, where a stream delivers one quote and drops again
+and the outage then reads as longer than it was. The bug was found the moment a second,
+independent implementation in SQL was compared against it on identical rows. All 40
+tests still pass against the fix.
+
+**Why the tests could not have found it.** Expectations are written by the same person
+who wrote the code, at the same time, from the same mental model. A test asserts that the
+function does what its author believed it did, so it inherits every blind spot the
+implementation has. Forty of them agreeing proves the author was consistent, not that the
+function is right.
+
+**The rule.** Where a rule is expressed twice for a legitimate reason, and query pushdown
+is one, the two definitions are pinned against each other **on real data** rather than
+each being tested against expectations. Two implementations disagreeing is evidence
+neither can produce alone, because the disagreement does not depend on anyone having
+anticipated the case. Where duplication is not justified, remove it instead; this is a
+rule about the duplication that survives review, not a licence to create it.
+
+**The instance.** `MarketDataRepository.tick_coverage` computes coverage as gaps and
+islands in SQL, because the client side version needs every timestamp in the window and a
+busy day holds over a million per instrument. `tests/persistence` runs both over the same
+stored ticks and asserts they agree.
+
+### Nothing in the universe configuration says what may be traded
+
+Recorded 2026-08-19 while moving the instrument universe into configuration.
+
+`config/base.toml` lists every instrument this system records and carries **no traded
+flag**, deliberately. Tradeability is arithmetic against live venue metadata, evaluated by
+the eligibility screen: BTC/USDT is excluded because its 0.001 step is 31 percent of a
+1 percent risk budget at 200 USD, and every forex pair is excluded because all 90 of them
+carry a 1000 unit minimum.
+
+**A flag there would turn arithmetic into a setting**, and that breaks the property
+`SPEC.md` 6.1 exists to guarantee. Capital independence means an instrument becomes
+tradeable when the account can afford it, with no code change and no configuration change.
+An excluded instrument re-enters on its own when the balance supports it, which is exactly
+how forex returns. A flag would make that a manual step, and a manual step is one someone
+has to remember at the moment the arithmetic already knows the answer.
+
+It would also make the two disagreeable. The screen would say eligible and the flag would
+say no, or the reverse, and there is no principled way to resolve that: one of them is
+measuring the venue and the other is recording an opinion.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited

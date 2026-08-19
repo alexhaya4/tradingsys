@@ -80,6 +80,21 @@ backfill_interval_seconds = 3600.0
 backfill_deadline_seconds = 5400.0
 backfill_window_seconds = 604800.0
 quote_deadline_seconds = 30.0
+recorder_batch_size = 500
+recorder_flush_interval_seconds = 5.0
+backfill_fetch_timeout_seconds = 30.0
+# Concurrency 3 is the feed's tolerance, not ours: Dukascopy throttles harder above it.
+backfill_concurrency = 3
+backfill_max_attempts_per_hour = 3
+backfill_backoff_seconds = 1.0
+# Comfortably above the longest one hour fetch, or two workers duplicate live work.
+backfill_stale_claim_seconds = 900.0
+gap_interval_seconds = 900.0
+gap_deadline_seconds = 1800.0
+gap_window_seconds = 7200.0
+gap_settle_seconds = 120.0
+gap_max_quiet_seconds = 10.0
+gap_minimum_seconds = 60.0
 """
 
 
