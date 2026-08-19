@@ -1261,6 +1261,81 @@ reporting it on evidence that did not distinguish the safe case from the dangero
 which is the same error as a health check that asserts existence rather than correct
 future action.
 
+### The startup deadlock, and diagnosing a failure mode in prose then shipping it
+
+Found on the host on 2026-08-19, after the app crash-looped for four hours.
+
+**The deadlock.** `assemble_ingest` resolves instrument row ids. `RegistrySync` is what
+stores the definitions those ids come from. The sync ran only as a supervised activity,
+started after assembly had already returned. So on a fresh database assembly raised
+`InstrumentNotFoundError`, the process exited before the activity started, and the sync
+that would have populated the table never ran. **Restarting could not fix it**, because
+every restart met the same empty table. That is the difference between a transient
+failure and a deterministic one, and it is why the restart policy now carries a cap.
+
+It was not the symbol mapping, which was the first suspicion and a reasonable one:
+`instrument_from_linear` produces `InstrumentId(bybit, ETH/USDT)` with `venue_symbol`
+`ETHUSDT`, and the lookup asks for the canonical side. Both halves were correct. Checking
+the table before assuming the mapping is what separated the two in one query.
+
+**The form worth naming, which is the reason this is here rather than in a commit
+message.** The function that raised carried this docstring, written days earlier:
+
+> The registry sync is what populates the table, so an absence here means the process is
+> starting before its first sync has ever run. That is a deployment ordering problem, and
+> starting anyway would record quotes against no instrument.
+
+The failure mode was identified precisely, in the right place, in advance, and shipped
+anyway. Writing the risk down discharged the feeling of having handled it without
+handling it. **A docstring describing a failure is not a mitigation of it**, and the
+moment to act on that sentence was while writing it, when the ordering was still an open
+question rather than a fact about the system.
+
+The practical rule: when a comment or docstring states a precondition that some other
+part of the system is responsible for establishing, that is a claim to verify at the time
+of writing, not an explanation to leave behind. Either the precondition is enforced where
+it is stated, or the sentence is a note about a bug that has not been filed.
+
+**Why the test suite did not catch it.** The integration test upserted the instrument
+directly in a fixture, so the table was populated before assembly ran. It constructed the
+precondition production had no way to construct for itself, which is the same shape as
+the coverage defect: the test exercised everything except the thing that broke. It now
+serves recorded venue responses through an injected HTTP client and lets the assembly's
+own sync populate the table.
+
+### A oneshot unit that starts a stack asserts nothing about the hours afterwards
+
+Recorded 2026-08-19, from the same incident.
+
+`tradingsys.service` ran `docker compose up -d` as a `oneshot` with `RemainAfterExit`.
+That command returns zero once containers are **created**, so the unit reported
+`active (exited)` and never looked again. It asserted that a deployment command had
+succeeded, which was true and remained true while the app died roughly two hundred times
+behind it.
+
+This is the defect class already recorded under liveness checks, appearing in the
+supervision layer where it was not applied: existence and correct future action are
+different properties, and for anything that must keep working it is the second that
+matters. The unit was checking that the stack had once started.
+
+**What it asserts now.** `up -d --wait` blocks until every service with a healthcheck
+reports healthy, so a start that succeeds means the app can serve rather than that a
+socket is open. `tradingsys-health.timer` then runs an assertion every minute against
+what is true now: every expected service exists, none has stopped, and every service
+carrying a healthcheck reports healthy. Failing that unit is what makes the condition
+visible to `systemctl`, to journald, and to an `OnFailure=` handler.
+
+**Compose owns restarts and systemd owns the assertion.** Two restart controllers with
+different backoffs is the arrangement that behaves strangely at three in the morning, so
+the unit deliberately does not restart anything.
+
+**The restart policy is capped rather than unlimited**, because the two failures differ.
+A venue outage is transient and retrying is right. A configuration or wiring error is
+deterministic, and infinite retry converts a loud failure into a quiet one, which is
+exactly what cost four hours. Twenty attempts against Docker's own backoff spans roughly
+fifteen minutes: long enough to ride out an outage, finite enough that a deterministic
+failure ends visibly stopped.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited

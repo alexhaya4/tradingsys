@@ -27,11 +27,20 @@ Group=__SERVICE_USER__
 Environment=TRADINGSYS_DATA_ROOT=__DATA_ROOT__
 EnvironmentFile=__REPO_ROOT__/.env
 
-ExecStart=/usr/bin/docker compose -f docker-compose.yml -f deploy/provision/docker-compose.prod.yml up -d --build
+# --wait, not bare up -d. Without it this command returns zero once containers are
+# created, so the unit reports active (exited) whether or not anything works. On
+# 2026-08-19 the app crash-looped for four hours behind exactly that, because creating a
+# container and running a process are different facts and only the first was asserted.
+#
+# --wait blocks until every service with a healthcheck reports healthy, and the app's
+# healthcheck probes /ready, so a start that succeeds means the process can serve rather
+# than that a socket is open.
+ExecStart=/usr/bin/docker compose -f docker-compose.yml -f deploy/provision/docker-compose.prod.yml up -d --build --wait --wait-timeout 300
 ExecStop=/usr/bin/docker compose -f docker-compose.yml -f deploy/provision/docker-compose.prod.yml down
 
-# A build on 2 vCPU can take several minutes on a cold cache.
-TimeoutStartSec=900
+# A build on 2 vCPU can take several minutes on a cold cache, and --wait then adds the
+# health settling time on top.
+TimeoutStartSec=1200
 
 [Install]
 WantedBy=multi-user.target

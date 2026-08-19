@@ -15,6 +15,19 @@ services:
   app:
     environment:
       TRADINGSYS_APP__ENVIRONMENT: production
+    restart: on-failure:20
+    # A cap, not unless-stopped. The two failures this process has are different and the
+    # policy has to suit both.
+    #
+    # A venue outage is transient and retrying is exactly right. A configuration or
+    # wiring error is deterministic: restarting cannot fix it, and infinite retry turns a
+    # loud failure into a quiet one. That is what cost four hours on 2026-08-19, when the
+    # app died repeatedly behind a systemd unit reporting active (exited).
+    #
+    # 20 is chosen from Docker's own backoff, which doubles from 100ms and caps at 60s,
+    # so twenty attempts span roughly fifteen minutes. Long enough to ride out a venue
+    # outage, finite enough that a deterministic failure ends visibly stopped rather than
+    # looping. Exhausting the cap is what tradingsys-health.timer then reports.
     # Bounded so one crashing container cannot fill the volume with logs. journald keeps
     # the recent history; the audit log in Postgres is the durable record.
     logging: &logging

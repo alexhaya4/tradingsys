@@ -1,0 +1,18 @@
+# Runs the health assertion every minute.
+#
+# A minute is chosen against what it is watching: the app's own healthcheck runs every
+# ten seconds with five retries, so a genuinely dead app is visible to Docker within
+# about a minute, and checking faster would report the same fact sooner than Docker
+# knows it.
+
+[Unit]
+Description=Run the tradingsys health assertion every minute
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=tradingsys-health.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,23 @@
+# Asserts that the stack is still working, as opposed to having once started.
+#
+# tradingsys.service is a oneshot: it starts the stack and reports active (exited).
+# That is the right shape for a thing compose supervises, and it means the unit says
+# nothing about the hours afterwards. This is what says something about them.
+#
+# Installed by deploy/provision/bootstrap.sh, which substitutes the paths. Edit this
+# file and re-run bootstrap rather than editing the installed copy.
+
+[Unit]
+Description=tradingsys stack health assertion
+Requires=docker.service
+After=tradingsys.service
+RequiresMountsFor=__DATA_ROOT__
+
+[Service]
+Type=oneshot
+WorkingDirectory=__REPO_ROOT__
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+Environment=TRADINGSYS_DATA_ROOT=__DATA_ROOT__
+EnvironmentFile=__REPO_ROOT__/.env
+ExecStart=__REPO_ROOT__/deploy/provision/assert_healthy.sh

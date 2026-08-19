@@ -162,14 +162,23 @@ echo "required secrets present"
 # ---------------------------------------------------------------------------
 step "installing the systemd unit"
 # ---------------------------------------------------------------------------
-sed -e "s|__REPO_ROOT__|${REPO_ROOT}|g" \
-    -e "s|__DATA_ROOT__|${DATA_ROOT}|g" \
-    -e "s|__SERVICE_USER__|${SERVICE_USER}|g" \
-    "${REPO_ROOT}/deploy/provision/tradingsys.service" \
-    | sudo tee /etc/systemd/system/tradingsys.service >/dev/null
+for unit in tradingsys.service tradingsys-health.service; do
+    sed -e "s|__REPO_ROOT__|${REPO_ROOT}|g" \
+        -e "s|__DATA_ROOT__|${DATA_ROOT}|g" \
+        -e "s|__SERVICE_USER__|${SERVICE_USER}|g" \
+        "${REPO_ROOT}/deploy/provision/${unit}" \
+        | sudo tee "/etc/systemd/system/${unit}" >/dev/null
+done
+sudo install -m 0644 "${REPO_ROOT}/deploy/provision/tradingsys-health.timer" \
+    /etc/systemd/system/tradingsys-health.timer
 sudo systemctl daemon-reload
 sudo systemctl enable tradingsys.service
+# The timer is what says anything about the hours after startup. tradingsys.service is a
+# oneshot and reports active (exited) whether or not the app is alive, which is how a
+# four hour crash loop went unreported on 2026-08-19.
+sudo systemctl enable --now tradingsys-health.timer
 echo "enabled, so the stack returns after a reboot"
+echo "health assertion runs every minute: systemctl status tradingsys-health.timer"
 
 # ---------------------------------------------------------------------------
 step "applying database migrations and starting"
