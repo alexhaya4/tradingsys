@@ -25,6 +25,8 @@ import re
 import subprocess
 import threading
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -32,8 +34,15 @@ from urllib.parse import parse_qs
 
 import pytest
 
+from tests.factories import eurusd
+from tradingsys.core.provenance import TickSource
+from tradingsys.venues.models import Quote
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from tradingsys.persistence.database import Database
+    from tradingsys.persistence.repositories import InstrumentRepository, MarketDataRepository
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROVISION = REPO_ROOT / "deploy" / "provision"
@@ -479,7 +488,9 @@ class TestTheWiring:
             assert os.access(path, os.X_OK), f"{unit.name} runs {command}, which is not executable"
 
     @pytest.mark.parametrize(
-        "unit", [PROVISION / "tradingsys-health.service"], ids=lambda p: p.name
+        "unit",
+        [PROVISION / "tradingsys-health.service", PROVISION / "tradingsys-recording.service"],
+        ids=lambda p: p.name,
     )
     def test_every_assertion_delivers_its_failure(self, unit: Path) -> None:
         body = unit.read_text()
@@ -568,6 +579,10 @@ class TestTheSchedules:
         assert "weekly" in body
         assert "grace" in body
 
+    def test_the_recording_assertion_runs_on_its_own_threshold(self) -> None:
+        timer = (PROVISION / "tradingsys-recording.timer").read_text()
+        assert "OnUnitActiveSec=5min" in timer
+
 
 class TestDefinitionsThatExistTwiceAgree:
     """Where a value is written in two files for a legitimate reason, pin them together.
@@ -586,6 +601,16 @@ class TestDefinitionsThatExistTwiceAgree:
         assert alert.group(1) == canary.group(1), (
             "alert.sh and canary.sh would keep their state in different places, so the "
             "canary sequence and the firing state would survive different failures"
+        )
+
+    def test_the_volume_threshold_default_is_the_same_in_both_checks(self) -> None:
+        pattern = r"TRADINGSYS_VOLUME_ALERT_PERCENT:-([0-9]+)\}"
+        healthcheck = re.search(pattern, (PROVISION / "healthcheck.sh").read_text())
+        assertion = re.search(pattern, (PROVISION / "assert_recording.sh").read_text())
+        assert healthcheck is not None
+        assert assertion is not None
+        assert healthcheck.group(1) == assertion.group(1), (
+            "the operator's check and the alert would disagree about where the line is"
         )
 
     def test_the_state_directory_default_is_what_bootstrap_creates(self) -> None:
@@ -617,3 +642,78 @@ class TestTheUnitFailureHandler:
         assert "nonexistent-unit.service failed" in text
         assert "no journal output" in text or "nonexistent" in text
 
+
+@pytest.mark.integration
+class TestTheStallQueryRunsAgainstARealDatabase:
+    """The query the recording assertion depends on, executed rather than read.
+
+    A shell script holding SQL is the easiest place in this repository for a broken
+    query to hide: nothing imports it, the type checker never sees it, and its failure
+    mode is an alert that fires every five minutes until the channel is muted, or one
+    that never fires at all. So the text is extracted from the script itself and run
+    against the real schema. Copying the query into this file would prove only that a
+    copy works.
+    """
+
+    def _sql(self) -> str:
+        body = (PROVISION / "assert_recording.sh").read_text()
+        match = re.search(
+            r"# --- BEGIN TICK AGE SQL ---\nTICK_AGE_SQL=\"(.+?)\"\n# --- END TICK AGE SQL ---",
+            body,
+            re.DOTALL,
+        )
+        assert match is not None, "the markers around the query moved; the test cannot find it"
+        return match.group(1)
+
+    async def test_an_empty_table_answers_with_no_rows(self, database: Database) -> None:
+        # Which the script reports as "nothing has ever been recorded on this host",
+        # a different condition from a stalled feed and worth a different sentence.
+        assert await database.fetch(self._sql()) == []
+
+    async def test_it_reports_an_age_in_seconds_per_source(
+        self,
+        instruments: InstrumentRepository,
+        market_data: MarketDataRepository,
+        database: Database,
+    ) -> None:
+        row_id = await instruments.upsert(eurusd())
+        now = datetime.now(UTC)
+        await market_data.store_ticks(
+            row_id,
+            TickSource.CTRADER,
+            [Quote(eurusd().id, now - timedelta(seconds=30), Decimal("1.085"), Decimal("1.0851"))],
+        )
+        await market_data.store_ticks(
+            row_id,
+            TickSource.DUKASCOPY,
+            [Quote(eurusd().id, now - timedelta(days=2), Decimal("1.085"), Decimal("1.0851"))],
+        )
+
+        rows = await database.fetch(self._sql())
+        ages = {row["source"]: row["age_seconds"] for row in rows}
+        assert ages[TickSource.CTRADER.value] == pytest.approx(30, abs=5)
+        assert ages[TickSource.DUKASCOPY.value] > 86_400
+
+    async def test_the_freshest_source_sorts_first(
+        self,
+        instruments: InstrumentRepository,
+        market_data: MarketDataRepository,
+        database: Database,
+    ) -> None:
+        # The script asserts on the first row and reports the rest. A backfill writing
+        # two day old history must never be what the stall threshold is measured
+        # against, or a dead live feed would read as healthy.
+        row_id = await instruments.upsert(eurusd())
+        now = datetime.now(UTC)
+        await market_data.store_ticks(
+            row_id,
+            TickSource.DUKASCOPY,
+            [Quote(eurusd().id, now - timedelta(days=2), Decimal("1.085"), Decimal("1.0851"))],
+        )
+        await market_data.store_ticks(
+            row_id,
+            TickSource.CTRADER,
+            [Quote(eurusd().id, now - timedelta(seconds=5), Decimal("1.085"), Decimal("1.0851"))],
+        )
+        rows = await database.fetch(self._sql())
+        assert rows[0]["source"] == TickSource.CTRADER.value

@@ -1,0 +1,23 @@
+# Runs the recording assertion every five minutes.
+#
+# The interval is chosen against the threshold it enforces rather than picked round. The
+# stall threshold is five minutes, so checking on the same period detects a stopped feed
+# within ten minutes at worst. Checking every minute would not detect it sooner, because
+# the threshold and not the interval is what decides, and it would run twelve times as
+# many queries against the database this host exists to fill.
+#
+# OnBootSec is longer than the health timer's because the stack has to be up and
+# recording before an assertion about recorded data means anything. Asserting into an
+# empty database during a boot is how a check earns its first false positive.
+
+[Unit]
+Description=Run the tradingsys recording assertion every five minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=tradingsys-recording.service
+
+[Install]
+WantedBy=timers.target

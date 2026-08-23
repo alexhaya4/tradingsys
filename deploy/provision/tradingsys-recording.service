@@ -1,0 +1,27 @@
+# Asserts that ticks are landing and the volume has room.
+#
+# Separate from tradingsys-health.service because it answers a different question. That
+# one asks whether the containers are healthy; this one asks whether the host is doing
+# the job it exists for. A stack can pass the first and fail this, which is the failure
+# this project has paid for repeatedly, so the two are kept apart rather than folded
+# into one assertion that could be half true.
+#
+# Installed by deploy/provision/bootstrap.sh, which substitutes the paths. Edit this
+# file and re-run bootstrap rather than editing the installed copy.
+
+[Unit]
+Description=tradingsys recording assertion
+Requires=docker.service
+After=tradingsys.service
+RequiresMountsFor=__DATA_ROOT__
+OnFailure=tradingsys-alert@%n.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=__REPO_ROOT__
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+Environment=TRADINGSYS_DATA_ROOT=__DATA_ROOT__
+Environment=TRADINGSYS_ALERT_KEY=%n
+EnvironmentFile=__REPO_ROOT__/.env
+ExecStart=__REPO_ROOT__/deploy/provision/assert_recording.sh
