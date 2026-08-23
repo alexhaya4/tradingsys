@@ -86,7 +86,7 @@ priced then rather than defaulted into. Volumes grow online and never shrink.
 ## 2. Get the repository onto the host
 
 ```bash
-ssh tradingsys@YOUR_DROPLET_IP
+ssh tradingsys@143.198.222.50      # the current host; see the table at the end
 git clone https://github.com/alexhaya4/tradingsys.git /opt/tradingsys
 cd /opt/tradingsys
 git checkout phase-2-market-data
@@ -117,6 +117,18 @@ python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
 `POSTGRES_PASSWORD` and `TRADINGSYS_DATABASE__PASSWORD` must be the same value: one is
 read by the Postgres container, the other by the application.
 
+**The three alerting values are required, not optional**, and `bootstrap.sh` refuses to
+continue without them for the same reason it refuses a placeholder password. A recorder
+that fails without telling anyone is the configuration this project has already decided
+not to operate: the first deployment crash looped for four hours behind a unit reporting
+success, and every assertion added since reports through this path.
+
+| Value | Where it comes from |
+|---|---|
+| `TRADINGSYS_ALERT_TELEGRAM_TOKEN` | BotFather, when the bot is created |
+| `TRADINGSYS_ALERT_TELEGRAM_CHAT_ID` | The destination chat, not the bot. Message the bot, then read `https://api.telegram.org/bot<TOKEN>/getUpdates` and take `message.chat.id` |
+| `TRADINGSYS_ALERT_DEADMAN_URL` | The ping URL of the external dead man switch. See "Alerting" below |
+
 The cTrader credentials are optional for the crypto-only recorder. Leave them unset until
 the forex leg re-enters, and note that the access token expires about 30 days from issue
 and the refresh call is not yet written.
@@ -133,8 +145,14 @@ editing `/etc/systemd/system/tradingsys.service` in place, or the host stops bei
 reproducible from the repository.
 
 It adopts the mount the platform created, creates `postgres` and `captures` directories
-with the ownership the containers need, checks the secrets, installs and enables the
-systemd unit, applies the migrations, and starts the stack.
+with the ownership the containers need, checks the secrets, prepares the alerting state
+directory at `/var/lib/tradingsys`, puts the service user in the `systemd-journal` group
+so the alert handler can read a failed unit's journal, installs and enables every systemd
+unit in `deploy/provision`, applies the migrations, and starts the stack.
+
+**It installs the directory rather than a list of units.** A list here would be a second
+definition of what the deployment consists of, and the way that fails is that a unit is
+written, wired, tested, and never reaches the host.
 
 **It does not format and it does not mount.** Removing `mkfs` also removed the only line
 in the script that could destroy recorded history.
@@ -145,10 +163,19 @@ in the script that could destroy recorded history.
 deploy/provision/healthcheck.sh
 ```
 
-Ten checks: the volume is mounted and has headroom, the unit is enabled so the stack
-returns after a reboot, the containers are up, liveness and readiness answer, the metrics
-carry `tradingsys_build_info`, the migrations are at head, the venue is reachable, and the
+Eleven checks: the volume is its own device and has headroom, the projection says how
+many days of runway are left, the unit is enabled so the stack returns after a reboot,
+the containers are up, liveness and readiness answer, the metrics carry
+`tradingsys_build_info`, the migrations are at head, the venue is reachable, and the
 clock is sane. Each reports why it failed, not only that it did.
+
+`healthcheck.sh` is the operator's check, run by hand. The two assertions below are the
+unattended ones, run by timers, and they are what alert:
+
+```bash
+deploy/provision/assert_healthy.sh      # every minute: containers exist and are healthy
+deploy/provision/assert_recording.sh    # every five minutes: ticks are landing, volume has room
+```
 
 Then run the venue assumptions check, which CI cannot do because venue credentials do not
 go into CI:
@@ -164,7 +191,7 @@ Every port binds to `127.0.0.1` and the firewall allows only SSH. Nothing is exp
 Reach Grafana, Prometheus and the app through a tunnel from your workstation:
 
 ```bash
-ssh -N -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 -L 8000:127.0.0.1:8000 tradingsys@YOUR_DROPLET_IP
+ssh -N -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 -L 8000:127.0.0.1:8000 tradingsys@143.198.222.50
 ```
 
 ---
@@ -197,18 +224,139 @@ cat /mnt/tradingsys_db/captures/*.json | python3 -m json.tool
 Coverage per hour is reported in seconds beside each rate. An hour with low coverage is a
 gap, not a quiet market, and the two must not be averaged together.
 
-## Running the 72 hour continuous ingestion run
+## Alerting
 
-**Not yet possible, and this section states why rather than implying otherwise.** The run
-is the phase 2 exit criterion and needs three things that do not all exist:
+**The alerting path is the only component that cannot verify itself.** Everything else on
+this host asserts something and reports through it; it has nothing to report through. No
+test establishes that a message reaches a phone in Kenya, so its verification is the
+arrival of a message rather than any code we write. That is what the canary is.
 
-1. The cTrader spot subscription, so there is a live forex quote stream. In progress.
-2. The ingest process wired into an entry point, configured, and tested. `app/ingest.py`
-   is written but constructed by nothing and measures 0 percent coverage.
-3. A host that does not suspend. This runbook is that.
+### What alerts, and what only logs
 
-When the first two land, the run is a `systemctl` unit like the stack itself rather than a
-foreground process in an SSH session, and this section gets the command.
+| Condition | How it is detected | What happens |
+|---|---|---|
+| A unit fails, for any reason including dying or timing out | systemd `OnFailure=` | Telegram, with the failed unit's last 30 journal lines |
+| Containers missing, stopped, or unhealthy | `assert_healthy.sh`, every minute | The unit fails, so the above |
+| No tick recorded for longer than the stall threshold | `assert_recording.sh`, every five minutes | The unit fails, so the above |
+| Data volume at or past the alert percentage | `assert_recording.sh`, every five minutes | The unit fails, so the above |
+| Venue API failure rates, reconnect churn, gap findings | Application logs and `StreamStats` | Logged only, until the 72 hour run completes |
+
+The last row is a decision rather than an omission. Thresholds set before there is a day
+of data are guesses, and a threshold that fires when nothing is wrong is the one that
+gets ignored first.
+
+### Repeats and recoveries
+
+A condition alerts once, then at most once every `TRADINGSYS_ALERT_REPEAT_MINUTES`, which
+defaults to 30. The assertion runs every minute, so without suppression a four hour
+outage would deliver 240 identical messages, and a channel that does that gets muted. A
+muted channel is the same as no channel.
+
+When the condition clears, a recovery message is sent. Being told a thing broke and never
+being told it healed means going to look, and a channel you have to verify by hand is not
+one you trust at three in the morning.
+
+Raising and clearing happen in different places on purpose. A failure is raised from
+outside the failing unit, by `OnFailure=`, because a unit that fails by dying cannot
+report its own death. A recovery is cleared from inside the assertion, because passing is
+an event only the assertion can observe.
+
+### The canary and the dead man switch
+
+`tradingsys-canary.timer` sends one message a day at 06:00 UTC, which is 09:00 in
+Nairobi. Each message carries a sequence number, the deployed commit, and the schedule.
+
+**A canary that arrives proves the path works. A canary that does not arrive proves
+nothing**, because silence is indistinguishable from a working system with nothing to
+report. So on every successful delivery the canary pings an external dead man switch,
+which alerts when the ping does not arrive.
+
+The switch is deliberately off this host and off Telegram, because the failures it exists
+to catch include this host being gone and the bot token being wrong, and either of those
+silences anything that runs here or sends there. One missing ping covers every way the
+path can break: host down, network down, timer disabled, unit never installed, token
+revoked, chat id wrong, Telegram unreachable.
+
+To set it up:
+
+1. Create a check on the dead man switch service with a period of 1 day and a grace of 25
+   hours, notifying by **email**, not Telegram. The channel has to differ from the one it
+   is watching.
+2. Put its ping URL in `.env` as `TRADINGSYS_ALERT_DEADMAN_URL`. Treat it as a secret:
+   anyone holding it can suppress the alert by pinging it themselves. That is a
+   suppression risk rather than a data risk, which is why a third party is acceptable
+   here and would not be in the trading path.
+3. Run the canary once by hand and confirm both halves land:
+
+```bash
+set -a; . ./.env; set +a
+deploy/provision/canary.sh          # a message on your phone, a ping on the switch
+```
+
+### Closing the 72 hour run: the cadence changes, both halves together
+
+Daily until the run completes, then weekly. A path broken on Monday and discovered on
+Sunday would have covered the whole run.
+
+1. Change `OnCalendar=*-*-* 06:00:00` to `OnCalendar=Mon *-*-* 06:00:00` in
+   `deploy/provision/tradingsys-canary.timer`.
+2. Widen the dead man switch's period to 7 days and its grace to 8 days.
+3. Re-run `deploy/provision/bootstrap.sh --skip-start` and confirm with
+   `systemctl list-timers tradingsys-canary.timer`.
+
+Both halves or neither. A weekly canary against a 25 hour grace reports an absence every
+week that nothing is wrong, which is how the switch itself gets ignored.
+
+### Testing the path without waiting for a failure
+
+```bash
+set -a; . ./.env; set +a
+
+# The last hop, on its own.
+deploy/provision/notify.sh "test from $(hostname)" "ignore this"
+
+# The whole handler, as OnFailure would run it.
+deploy/provision/alert_unit_failed.sh tradingsys-health.service
+
+# A real failure, end to end: stop a container and wait for the assertion.
+docker compose -f docker-compose.yml -f deploy/provision/docker-compose.prod.yml stop redis
+journalctl -u tradingsys-health.service -f          # the assertion fails, the alert goes
+docker compose -f docker-compose.yml -f deploy/provision/docker-compose.prod.yml start redis
+                                                    # then the recovery arrives
+```
+
+The last one is the only test that proves the wiring rather than the pieces, and it is
+worth running once after any change to the units.
+
+## Continuous operation, and the run that is the exit criterion
+
+**These are two different things and this section keeps them apart, because "72 hours
+elapsed" and "the phase 2 exit criterion is met" are different claims.**
+
+*Continuous operation starts as soon as a deploy verifies.* The stack runs under
+`tradingsys.service` and records crypto continuously. Nothing needs to be started by
+hand: the ingest process is assembled at startup and supervised, and the two assertion
+timers report when it stops. Crypto spread history only accumulates forward, because
+Bybit publishes none of it, so every hour not recording is permanently lost and there is
+no reason to wait.
+
+*The exit criterion run is not this.* `SPEC.md` section 8 requires continuous ingestion
+across **both** venues for 72 hours. The forex leg contributes backfill history and no
+live quotes, because a stream without reconnection would die on its first disconnection
+and `app/assembly.py` deliberately does not wire one. So the criterion run happens after
+reconnection with resynchronisation lands, with both legs live, and a crypto-only run
+before then is operational evidence rather than the gate.
+
+What the crypto-only run is worth, which is not nothing: it exercises supervision,
+alerting, storage growth and the reconnect counters in `StreamStats` under real
+conditions, before the run that counts depends on all four.
+
+Watch it with the assertions rather than by tailing logs:
+
+```bash
+systemctl list-timers 'tradingsys-*' --no-pager
+journalctl -u tradingsys-recording.service --since '1 hour ago' --no-pager
+```
 
 ---
 
@@ -223,19 +371,78 @@ as nothing but the recorder runs on the host.
 
 ## Reboots and updates
 
-The systemd unit is enabled, and every service carries `restart: unless-stopped`, so a
-reboot returns the stack without anyone logging in. `RequiresMountsFor` on the data root
-means the unit refuses to start if the volume is not mounted, rather than letting Postgres
-create a fresh database on the root disk, which would be silent.
+The systemd unit is enabled, so a reboot returns the stack without anyone logging in.
+`RequiresMountsFor` on the data root means the unit refuses to start if the volume is not
+mounted, rather than letting Postgres create a fresh database on the root disk, which
+would be silent.
 
-To deploy a new commit:
+**The restart policies differ by service and the difference is deliberate.** The
+datastores carry `restart: unless-stopped` from the base compose file. The app carries
+`restart: on-failure:20` from the production overlay, because its two failure modes are
+not the same thing: a venue outage is transient and retrying is right, while a
+configuration or wiring error is deterministic and infinite retry converts a loud failure
+into a quiet one. Twenty attempts against Docker's own backoff spans roughly fifteen
+minutes, after which the container stops and `assert_healthy.sh` reports it.
+
+### Deploying a new commit
+
+Every step states what it asserts. The sequence exists in this shape because a deploy
+that asserts less than it appears to is what cost four hours on 2026-08-19.
 
 ```bash
+ssh tradingsys@143.198.222.50
 cd /opt/tradingsys
-git pull
-sudo systemctl restart tradingsys      # rebuilds the app image
+
+# 1. Stop the assertions before changing what they assert about, or they fire during
+#    your own deploy window and alert you about yourself.
+sudo systemctl stop tradingsys-health.timer tradingsys-recording.timer
+
+# 2. Pull, and confirm what you have rather than what you expect.
+git fetch origin
+git status                                        # on phase-2-market-data, clean
+git pull --ff-only origin phase-2-market-data
+git log --oneline -3
+
+# 3. Re-run bootstrap without starting. It installs every unit in deploy/provision,
+#    re-checks that .env holds no placeholder, and converges the host. Idempotent.
+deploy/provision/bootstrap.sh --skip-start
+
+# 4. Migrations before the restart, never after. The app refuses to start against an
+#    unmigrated database, and step 5 blocks until the app is healthy, so a pending
+#    migration would present as a start timeout rather than as itself.
+set -a; . ./.env; set +a
+export TRADINGSYS_DATA_ROOT=/mnt/tradingsys_db
+docker compose -f docker-compose.yml -f deploy/provision/docker-compose.prod.yml up -d db
+docker compose -f docker-compose.yml -f deploy/provision/docker-compose.prod.yml \
+    run --rm app alembic upgrade head
+
+# 5. Restart, not start. On an already active oneshot, start is a no-op that returns
+#    zero and leaves the old image running. This rebuilds and blocks on --wait until
+#    every service with a healthcheck reports healthy.
+sudo systemctl restart tradingsys.service
+systemctl status tradingsys.service --no-pager
+
+# 6. Assert by hand before handing the assertions back to their timers.
+deploy/provision/assert_healthy.sh
+deploy/provision/assert_recording.sh
+
+# 7. Confirm the stack is recording, which is a different fact from being healthy.
+docker compose -f docker-compose.yml -f deploy/provision/docker-compose.prod.yml \
+    exec -T db psql -qtAX -U tradingsys -d tradingsys \
+    -c "SELECT source, count(*), max(ts) FROM ticks GROUP BY source"
+
+# 8. Hand the assertions back, and confirm they are actually scheduled.
+sudo systemctl start tradingsys-health.timer tradingsys-recording.timer
+systemctl list-timers 'tradingsys-*' --no-pager   # NEXT populated for all three
+
+# 9. The operator's full check, and the venue drift check CI cannot do.
 deploy/provision/healthcheck.sh
+uv run python scripts/check_venue_assumptions.py
 ```
+
+Rollback is `git checkout <previous sha>` and step 5 again. It is only that simple when
+no migration was applied in between: a schema change is not symmetric, and the downgrade
+has to be run deliberately before the older image starts against a newer schema.
 
 Run `scripts/verify.sh` before pushing anything that will land here. It is the only
 verification path and CI runs the same script.
@@ -246,9 +453,17 @@ verification path and CI runs the same script.
 
 Recorded so that a session that did not create it does not have to infer it.
 
+**The address is an observation, not a configuration value.** Nothing in this repository
+sets it, no test can check it, and CI cannot know it: a droplet is created by a person in
+a panel and the number that comes back is a fact about the world. It therefore lives in
+this table with the other observed state rather than in prose, where a stale copy reads
+like an instruction. The first droplet, at `206.189.147.213`, was destroyed and rebuilt
+because it had been created without pasting `cloud-init.yaml` and so had neither Docker
+nor the service user.
+
 | | |
 |---|---|
-| Address | 206.189.147.213 |
+| Address | 143.198.222.50 |
 | Region | DigitalOcean SGP1, Singapore |
 | Image | Ubuntu 24.04 |
 | Droplet | 2 vCPU, 4 GB RAM, 80 GB disk |

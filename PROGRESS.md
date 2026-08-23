@@ -4,10 +4,12 @@ Companion to `SPEC.md`. This file is updated as work completes. `SPEC.md` is
 not modified except by explicit direction from the director.
 
 **Current phase:** 2, Market data
-**Status as of 2026-08-18T07:20Z:** in progress and not complete. CI is green on HEAD.
-The 72 hour ingestion run that closes the phase is blocked on one missing piece of
-protocol work, the cTrader spot subscription. Phase 1 is complete and accepted; its
-record is kept below unchanged.
+**Status as of 2026-08-23T09:20Z:** in progress and not complete. CI is green on
+`f9e721e`, which is HEAD and is pushed. The recorder is deployed to a DigitalOcean
+droplet in Singapore and is running code that predates the two fixes on this branch.
+The run that closes the phase needs live forex, which needs reconnection with
+resynchronisation, which is not built. Phase 1 is complete and accepted; its record is
+kept below unchanged.
 
 **Read the phase 2 "Start here" section before doing anything.** It names the single
 next task and the two findings a fresh session would otherwise waste time
@@ -279,32 +281,37 @@ of this file did not, and arrived stale: it recorded CI as red when the next run
 already turned it green, and counted two CI runs when a third existed. A tracker written
 mid-run either dates its claims or misleads the session it was written for.
 
-### Start here, as of 2026-08-18T07:20Z
+### Start here, as of 2026-08-23T09:20Z
 
 **Phase 2 is not complete and its exit criteria are not met.** The gate is a 72 hour
-continuous ingestion run across both venues, and that is blocked on one missing piece of
-protocol work.
+continuous ingestion run across both venues. Crypto is live and forex is not, so the run
+that closes the phase is blocked on reconnection with resynchronisation rather than on
+the spot subscription, which is built.
 
 | | |
 |---|---|
-| Branch | `phase-2-market-data` at `d4207dc`, pushed. `main` is still the phase 1 commit `49512cf` and phase 2 is not merged into it |
+| Branch | `phase-2-market-data` at `f9e721e`, pushed. `main` is still the phase 1 commit `49512cf` and phase 2 is not merged into it |
 | CI | Green on HEAD. Runs `scripts/verify.sh --fresh --down` on every branch |
-| Tests | 1230 unit, 87 integration. `ruff` format and check clean, `mypy --strict` clean over 125 files |
-| Working tree | Clean |
+| Tests | 1409 unit, 105 integration. `ruff` format and check clean, `mypy --strict` clean over 138 files |
+| Host | Deployed at 143.198.222.50, DigitalOcean Singapore. **Running code older than this branch:** the startup deadlock fix and the health assertion are committed and not yet deployed |
 
-**The single next task is the cTrader spot subscription.** Without it there is no live
-forex quote stream, so the 72 hour run cannot start, because `SPEC.md` section 8 requires
-continuous ingestion for both venues and only crypto is live. Everything else in phase 2
-is either done or is a decision waiting on the director.
+**The single next task is reconnection with resynchronisation for the cTrader spot
+stream.** Until it exists the assembly deliberately wires no live forex quotes, because a
+leg that dies on its first disconnection is worse than an absent one, so the exit
+criterion run cannot start.
 
-**Two things a fresh session would otherwise waste time rediscovering:**
+**Three things a fresh session would otherwise waste time rediscovering:**
 
-1. This host suspends. Anything measuring elapsed time must use wall clock, never a
-   monotonic clock, and must record its own coverage. This has now cost three separate
-   failures. See "The clock defect class" below before writing anything with a timer.
+1. The development host suspends. Anything measuring elapsed time must use wall clock,
+   never a monotonic clock, and must record its own coverage. This has cost three
+   separate failures. See "The clock defect class" below before writing anything with a
+   timer. The droplet does not suspend, which is why it exists.
 2. Forex is not tradeable at 200 USD on the current venue, at any stop distance. That is
    a capital finding rather than a bug, and the arithmetic is in "What the account can
    actually trade" below. Do not try to fix it in code.
+3. A crypto-only 72 hour run is continuous operation and **not** the exit criterion. The
+   two are different claims and this tracker has conflated three things of that shape
+   already. See "Continuous operation is not the exit criterion" below.
 
 ### Task status, as of 2026-08-19T00:20Z
 
@@ -320,11 +327,11 @@ many missing links.
 
 | Task | Status | Constructed by | Feeds | Notes |
 |---|---|---|---|---|
-| Schedule-aware gap detection | **Complete but unreached** | NOTHING | NOTHING | `find_gaps` and `coverage_from_timestamps` are exported and tested and **no production code calls either**. The backfill uses `missing_open_hours` in `backfill_job.py`, which is hour granularity for queueing and a different function. So `SPEC.md` phase 2's "gap detection proven by deliberate disconnection" has no code path in the running system today |
+| Schedule-aware gap detection | Complete | `GapMonitor` in `app/gapcheck.py`, constructed by `assemble_ingest` | Logged and audited gap findings | `find_gaps` now has a production caller, closed 2026-08-19. Coverage comes from `MarketDataRepository.tick_coverage`, computed in SQL, and the integration suite runs both implementations over the same stored ticks and asserts they agree |
 | Dukascopy `.bi5` reader | Complete | `marketdata/backfill.py` | Backfill runner | Byte for byte round trip against a recorded hour |
-| Bybit instrument metadata | Complete | NOTHING | Would feed `BybitInstrumentSource`, which does not exist | Mapping functions only. Nothing presents them as an `InstrumentSource`, so the registry cannot sync Bybit |
-| Bybit public REST client and rate limiter | Complete | NOTHING | Assembly, then `BybitInstrumentSource` | Envelope checked, 403 as a ten minute block |
-| Bybit WebSocket quote stream | Complete | NOTHING | Assembly, then `QuoteRecorder` | `orderbook.1`, resynchronises, silence treated as death |
+| Bybit instrument metadata | Complete | `BybitInstrumentSource` | `RegistrySync` | Mapping functions, now presented as an `InstrumentSource` |
+| Bybit public REST client and rate limiter | Complete | `assemble_ingest` | `BybitInstrumentSource` | Envelope checked, 403 as a ten minute block |
+| Bybit WebSocket quote stream | Complete | `assemble_ingest` | `QuoteRecorder` | `orderbook.1`, resynchronises, silence treated as death |
 | Quote recorder into the tick table | Complete | `IngestProcess`, injected | `MarketDataRepository.store_ticks` | Batched, retried, flushed on shutdown |
 | Instrument eligibility screen | Complete | NOTHING | Reporting and phase 5 | Evaluated against live metadata |
 | Funding drag measurement | Complete | Measurement, not a component | `SPEC.md` 5.5 | Reported below |
@@ -332,33 +339,64 @@ many missing links.
 | cTrader adapter: transport | Complete | `scripts/check_venue_assumptions.py`, assembly | Symbols, spots, source | Verified against the real demo account |
 | cTrader adapter: symbol metadata | Complete | `venues/ctrader/source.py` | Instrument definitions | Digits, volumes, swap, schedule |
 | cTrader spot subscription | Complete | NOTHING | Assembly, then `QuoteRecorder` | Verified live: 146 events, 146 quotes across four pairs. Half-quote path proven by test only, since the venue sent both sides on every event |
-| Instrument registry from venue metadata | **Partial** | NOTHING | `InstrumentRepository` | `RegistrySync` tested at 94 percent. `venues/ctrader/source.py` at 0 percent and constructed by nothing. No Bybit source exists at all |
+| Instrument registry from venue metadata | Complete | `assemble_ingest`, which seeds it before resolving any row id | `InstrumentRepository` | Both sources exist and are tested. The seeding order is what broke on 2026-08-19: assembly resolved row ids before the sync that creates them had ever run, so a fresh database could never populate itself |
 | Resumable Dukascopy backfill | Complete | `BackfillJob` | Tick storage | `HttpHourFetcher` has **no tests** and is constructed only by `scripts/crosscheck_release_spread.py` |
 | Backfill caller | Complete | NOTHING | Backfill runner and queue | Queues missing open hours from the instrument's own schedule |
 | Capital independence, SPEC 6.1 | Complete | `risk/screen.py` | Eligibility verdicts | Property tests over eight orders of magnitude |
 | Sizing deliverable | Complete | Measurement, not a component | `SPEC.md` 6.2 | No forex class is eligible at 200 USD |
 | Round trip cost measurement | Complete | Measurement, not a component | Phase 3 cost model | Commission dominates |
-| Supervised ingest process | **Partial** | NOTHING | `Supervisor`, recorder, registry, backfill | `Supervisor` at 98 percent and `app/ingest.py` now tested and configured. Still constructed by no entry point: the assembly is the missing root |
+| Supervised ingest process | Complete | `assemble_ingest`, from `Application.start` | `Supervisor`, recorder, registry, backfill, gap monitor | Four supervised activities: `crypto_quotes`, `instrument_registry`, `dukascopy_backfill`, `gap_detection` |
 | Ingest configuration | Complete | `Settings` | `IngestPlan.from_settings` | Deadline against interval, and window against deadline, validated at load |
-| **Runtime assembly** | **Not started** | Would be `Application.start` | Everything above | The missing root. Needs `BybitInstrumentSource` first |
-| **`BybitInstrumentSource`** | **Not started** | Would be assembly | `RegistrySync` | Scope addition found 2026-08-19 by tracing, not listed before |
+| Runtime assembly | Complete | `Application.start` in `app/runtime.py` | Everything above | Was the missing root that nearly every live-ingest component terminated at. Built 2026-08-19, tested against a real database before deploying |
+| `BybitInstrumentSource` | Complete | `assemble_ingest` | `RegistrySync` | Scope addition found 2026-08-19 by tracing. Built the same day |
 | cTrader refresh token call | Not started | Would be `CTraderConnection` | Credential rotation | Access token expires about 30 days from issue |
 | Reconnection with resynchronisation | Not started | Would be assembly | Spot stream, `forget()` | `CTraderSpotStream.forget()` exists for it. Forex ingest waits on this rather than shipping a leg that dies on first disconnect |
 | Weekday crypto rate capture | **Failed, not rerun** | Operator, on the VPS | Retention sizing, repeat decision | Three attempts lost to the clock defect |
 | Crypto retention window | **Blocked** | Decision | Volume sizing | Priced against the volume when the capture lands |
-| 72 hour continuous ingestion run | **Blocked** | Operator, on the VPS | Phase 2 exit | Needs the assembly, reconnection, and the VPS |
+| 72 hour continuous ingestion run | **Blocked** | Operator, on the droplet | Phase 2 exit | Needs live forex, so it needs reconnection with resynchronisation. A crypto-only run is continuous operation and not this. See below |
+| Stack health assertion | Complete | `tradingsys-health.timer`, every minute | `OnFailure=`, then Telegram | Containers exist, none stopped after exhausting the restart cap, healthchecks pass |
+| Alerting delivery and suppression | Complete | `tradingsys-alert@.service`, from `OnFailure=` on every assertion | Telegram | First occurrence sends, repeats every 30 minutes, recovery on clear. Delivery tested over real HTTP against a local server |
+| Alerting canary | Complete | `tradingsys-canary.timer`, daily at 06:00 UTC | Telegram, then the dead man switch | The path cannot verify itself, so its verification is a message arriving. Weekly after the 72 hour run, as a runbook step |
+| Absence detection | Complete | `canary.sh`, on successful delivery only | External dead man switch, by email | Off this host and off Telegram, because it has to survive the failures it reports |
+| Recording assertion | Complete | `tradingsys-recording.timer`, every five minutes | `OnFailure=`, then Telegram | Tick row age and volume headroom. The SQL is executed by the integration suite against the real schema |
+| Tier 3 alert conditions | Deliberately deferred | Application logs | Nothing, until the run completes | Venue failure rates, reconnect churn, gap findings. Thresholds set before a day of data are guesses |
 
 ### Outstanding work, in the order it should be done
 
-1. **cTrader spot subscription.** `ProtoOASubscribeSpotsReq` (2127) and the spot event.
-   This unblocks the 72 hour run and is the only item that does.
-2. **Reconnection with resynchronisation**, built once against the subscription state it
-   has to restore rather than twice.
-3. **Re-run the weekday crypto capture** on the fixed script, then size crypto retention
+1. **Deploy the current branch to the droplet.** It is running code that predates the
+   startup deadlock fix and the health assertion. The sequence is in the runbook under
+   "Deploying a new commit" and it is not the old three-line recipe.
+2. **Start continuous crypto recording**, which the deploy does by itself. Every hour not
+   recording is permanently lost, because Bybit publishes no historical quote data.
+3. **Reconnection with resynchronisation**, built once against the subscription state it
+   has to restore rather than twice. This is what the exit criterion run waits on.
+4. **Tier 2 metrics**, after the run's first day, with thresholds set from a day of
+   observed data rather than guessed before there is any.
+5. **Re-run the weekday crypto capture** on the fixed script, then size crypto retention
    and decide the snapshot repeat question with the row counts in hand.
-4. **72 hour continuous ingestion run.** Report to the director before starting it.
-5. The cTrader refresh token call, before any deployment that outlives the access token,
+6. **The exit criterion run**: 72 hours with both legs live. Report to the director
+   before starting it.
+7. The cTrader refresh token call, before any deployment that outlives the access token,
    which expires about thirty days from issue.
+
+### Continuous operation is not the exit criterion
+
+**Two claims, kept apart deliberately, because this tracker has already conflated three
+things of this shape.**
+
+*Continuous operation* starts the moment a deploy verifies. The stack records crypto
+under `tradingsys.service`, the assembly wires the ingest process at startup, and two
+timers assert that it is still working. Nothing about it needs a decision.
+
+*The exit criterion* is `SPEC.md` section 8: continuous ingestion across **both** venues
+for 72 hours. The forex leg contributes backfill history and no live quotes, because
+`app/assembly.py` deliberately wires no stream that would die on its first disconnection.
+So a crypto-only run of any length does not close phase 2.
+
+Directed by the director on 2026-08-23: run it crypto-only anyway, and do not call it the
+exit criterion. Waiting costs data that cannot be recovered, and the run exercises
+supervision, alerting, storage growth and the reconnect counters before the run that
+counts depends on all four.
 
 ### Where the phase 2 code lives
 
@@ -641,6 +679,8 @@ answer:**
 | Whether `/health` should register an internal invariant such as a stalled loop detector | A decision. The empty check list is deliberate: liveness must not depend on anything external. The concern that an endpoint asserting nothing gets trusted for more than it checks is not answered by that |
 | Unchanged Bybit snapshot repeats stored as rows | The measured row counts from a successful capture, then a decision. Up to 28,800 rows per instrument per day carry no information in a quiet market. The detection rule is exact, since an unchanged repeat reuses the update id |
 | Which of the three forex options to take | A decision. A second venue adapter is real work and should be chosen rather than drifted into |
+| Tier 2 metric thresholds | A day of observed data from the crypto run, then figures. Set earlier they are guesses, and a threshold that fires when nothing is wrong is the one that gets ignored |
+| Tier 3 conditions promoted from logs to alerts | The run completing. Venue failure rates, reconnect churn and gap findings log today, by decision |
 | The margin above break even that the phase 8 gate requires | A stated figure, set before the paper period begins. It cannot be derived from quote data and needs real fills, so it is a judgement recorded at the gate |
 | Dukascopy volume units | A published definition, or a cross check against Pepperstone over an overlapping window with the ratio reported |
 | Whether to rerun the crypto capture on this host or somewhere that stays awake | A decision. The fixed script makes a partial capture usable rather than misleading, but a contiguous 24 hours may not be achievable here |
@@ -692,6 +732,19 @@ before each phase closes and before any deployment**, because CI cannot catch ve
 ---
 
 ### Infrastructure notes
+
+**The recorder is deployed, and the host address is an observation rather than a
+setting.** 143.198.222.50, DigitalOcean Singapore, user `tradingsys`, repository at
+`/opt/tradingsys`, 60 GB XFS volume at `/mnt/tradingsys_db`. Nothing in this repository
+sets that address and no test can check it: a droplet is created by a person in a panel
+and the number that comes back is a fact about the world. The first droplet,
+`206.189.147.213`, was destroyed and rebuilt because it had been created without pasting
+`cloud-init.yaml` and therefore had neither Docker nor the service user. The runbook's
+"host, as provisioned" table is the single place this is recorded.
+
+**The deployed host is behind this branch.** The startup deadlock fix at `b9a5ffe`, the
+healthcheck export, and the health assertion at `f9e721e` are all committed, pushed, CI
+green, and not on the host.
 
 **The repository has a remote.** `https://github.com/alexhaya4/tradingsys`, private,
 created 2026-08-16. History was scanned for credentials before the first push, not after:

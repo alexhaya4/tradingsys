@@ -1336,6 +1336,203 @@ exactly what cost four hours. Twenty attempts against Docker's own backoff spans
 fifteen minutes: long enough to ride out an outage, finite enough that a deterministic
 failure ends visibly stopped.
 
+### Alerting lives in the shell and systemd layer, not in the application
+
+Decided 2026-08-23, while building the path.
+
+**The failure the alerter most needs to report is the application being dead, and an
+alerter inside the application cannot report it.** That single constraint places every
+piece: the assertions are shell scripts, the schedule is a systemd timer, the delivery is
+`curl`, and the whole path keeps working while the Python process is in a crash loop or
+absent. It is also why the failure handler is attached with `OnFailure=` rather than
+called by the thing that failed. A unit that dies, times out, or has its script deleted
+cannot run anything of its own, and those are precisely the cases an in-process alerter
+misses.
+
+**So the alerting variables are flat names**: `TRADINGSYS_ALERT_TELEGRAM_TOKEN`,
+`TRADINGSYS_ALERT_TELEGRAM_CHAT_ID`, `TRADINGSYS_ALERT_DEADMAN_URL`. The double
+underscore convention maps a dotted path into the application's settings tree, and these
+never reach it. Giving them the settings shape would imply that they do.
+
+**bootstrap.sh refuses to provision a host without them.** A recorder that fails without
+telling anyone is the configuration this project has already decided not to operate, and
+the argument is the same one that refuses a placeholder password: the failure is silent,
+and a silent failure at provisioning time is discovered at the worst possible later
+moment.
+
+### The alerting path is the one component that cannot verify itself
+
+Directed by the director on 2026-08-23. The reasoning is the part worth keeping.
+
+Every other component on the host asserts something and reports through the alerting
+path. The path has nothing to report through. No test we write can establish that a
+message reaches a phone on a Kenyan mobile network, so **its verification has to be the
+arrival of a message rather than any code**.
+
+Hence a canary: one message a day, carrying a sequence number, the deployed commit and
+the schedule. Daily until the 72 hour run completes, then weekly, because a path broken
+on Monday and discovered on Sunday would have covered the whole run.
+
+What the tests can establish, and do, is everything up to the last hop: that the scripts
+run, that the wiring names files which exist, that a refusal is loud, that a repeat is
+suppressed, that a recovery is sent. `notify.sh` takes its API base from the environment
+so the delivery path can be exercised against a server that answers. The last hop stays
+unverifiable by construction, which is why the canary exists rather than being a
+substitute for tests.
+
+### A missing canary is detected off this host, and off Telegram
+
+Directed by the director on 2026-08-23, amending the proposal.
+
+**A canary that arrives proves the path works. A canary that does not arrive proves
+nothing**, because silence is indistinguishable from a working system with nothing to
+report. Relying on anyone noticing an absence is not a mechanism.
+
+The detector cannot share either the host or the channel with the thing it watches. The
+failures it exists to catch include this host being gone, which silences anything running
+here, and the bot token being revoked or the chat id being wrong, which silences anything
+sending there. A detector that shares either goes quiet in exactly the case it was built
+for.
+
+So the canary pings an external dead man switch on every successful delivery, and only on
+a successful delivery, and the switch notifies by email when the ping does not arrive.
+One missing ping covers every way the path can break: host down, network down, timer
+disabled, unit never installed, token revoked, chat id wrong, Telegram unreachable.
+
+**There are two verifiers and they check different things.** The machine verifies that
+Telegram accepted the message and that the ping arrived. Only the director verifies that
+the message reached the handset, by seeing it. The switch covers the case where he sees
+nothing.
+
+**The ping URL is a secret, and the risk it carries is suppression rather than
+disclosure.** Anyone holding it can silence the absence alert by pinging it themselves.
+Nothing about the system leaks through it. That asymmetry is why a third party is
+acceptable here and would not be acceptable anywhere in the trading path.
+
+**GitHub Actions was considered and disqualified.** A scheduled workflow fires only from
+the default branch, so using it would mean putting a workflow on `main` to satisfy
+monitoring, which the director refused. The reason it was attractive is worth recording
+anyway: it is infrastructure we already trust and it runs off this host.
+
+### A repeat is suppressed and a recovery is sent, because a muted channel is no channel
+
+Decided 2026-08-23, with the suppression requirement supplied by the director.
+
+The health assertion runs every minute. Without suppression a stack that stays down for
+four hours delivers 240 identical messages, and a channel that does that gets muted. **A
+muted channel and no channel are the same thing**, which makes unbounded repetition a way
+of destroying the alerting path rather than a way of using it.
+
+A condition therefore alerts once, then at most once every 30 minutes while it persists,
+which is eight messages across a four hour outage. The repeats say how long it has been
+failing and how many alerts have been sent, so a repeat is not mistaken for a new
+occurrence.
+
+**A recovery message is mandatory for the same reason.** Being told a thing broke and
+never being told it healed means going to look, and a channel you have to verify by hand
+is not one you trust at three in the morning.
+
+**Raise and clear are called from different places, and the asymmetry is the design.**
+Raising happens outside the failing unit, through `OnFailure=`, because a unit that fails
+by dying cannot report itself. Clearing happens inside the assertion, because passing is
+an event only the assertion can observe. Each is placed where the event it reports is
+visible.
+
+**A delivery that fails does not count as a delivery.** The state file records the
+condition as firing with no send time, so the next occurrence retries immediately instead
+of waiting out a cooldown on a message nobody received. That case is the first alert of
+an outage, which is the one that matters most.
+
+### A stall is the age of the newest tick row, never the liveness of the recorder
+
+Decided 2026-08-23, confirmed by the director.
+
+This is the fifth appearance of one defect class, and the first time it has been designed
+against rather than discovered. A process that is running and recording nothing looks
+identical from outside to one that is running and recording everything. The supervisor
+already answers this question from inside, by requiring each activity to report progress
+against a wall clock deadline. The assertion added here answers it from outside, by
+measuring the outcome: how long ago the newest row landed in the tick table.
+
+They are not redundant. The supervisor measures what the recorder believes; the table
+measures what actually persisted. A write path that fails after a quote arrives moves one
+and not the other.
+
+**The threshold is derived rather than chosen.** The supervisor's own quote deadline is
+30 seconds, the recorder flushes its batch every 5, and a crashed app restarts and
+reconnects in tens of seconds. Five minutes is ten supervisor deadlines plus a full
+restart cycle, so anything it catches has already survived the recovery the system
+performs for itself.
+
+**Its limitation is stated now because it becomes wrong later.** The assertion measures
+the freshest source and reports the rest, so while crypto is the only live stream a
+healthy crypto feed would mask a dead forex one. That is the same limitation the gap
+monitor records for provenance and it has the same remedy: when forex records live, this
+asserts per source. Recorded here so the day it matters it is a known limit rather than a
+surprise.
+
+### The 72 hour crypto-only run is continuous operation, not the exit criterion
+
+Directed by the director on 2026-08-23.
+
+`SPEC.md` section 8 requires continuous ingestion across both venues for 72 hours. The
+assembly deliberately wires no live forex stream, because a stream without reconnection
+would die on its first disconnection and a leg known to be broken is worse than an absent
+one. So a run started today is crypto only and does not close the phase.
+
+It is still worth starting immediately, and waiting would cost something real: crypto
+spread history only accumulates forward, because Bybit publishes none of it, so every
+hour not recording is permanently lost. The run also exercises supervision, alerting,
+storage growth and the reconnect counters under real conditions before the run that
+counts depends on all four.
+
+**The distinction is recorded because the tracker has already conflated three claims of
+this shape.** "72 hours elapsed" and "the exit criterion is met" are different claims, and
+the criterion run happens after reconnection with resynchronisation lands, with both legs
+live.
+
+### Why the tracker drifts when the code does not, and the cheapest gate against it
+
+Directed by the director on 2026-08-23, after `PROGRESS.md` was found carrying three
+false rows: that the cTrader spot subscription was the next task when it was complete,
+and that the runtime assembly and `BybitInstrumentSource` were not started when both were
+built.
+
+**The director's diagnosis, which is right: `PROGRESS.md` is the only artifact in this
+repository updated by intention rather than by a gate, so nothing fails when it is
+wrong.** Every other claim the project makes is enforced by something that runs. Types are
+checked, lints are checked, behaviour is tested, the verification path is executed by CI,
+and the deployment is converged by a script. The tracker is prose, and prose degrades
+silently. This is the third instance, after the CI-never-ran claim and the
+complete-but-unreached claim, and all three have the same shape: a written status that no
+observation supports, in the file whose whole purpose is to be trusted by a session that
+cannot check everything.
+
+**The gate, in `tests/test_tracker_claims.py`.** Three rules, chosen because each is
+mechanical, cheap, and produces no false positives on a correct tracker:
+
+1. Every repository path named in backticks in `PROGRESS.md` exists. This catches a
+   renamed or deleted module still being described as though it were there.
+2. A task row whose status is "Not started" may not name, in its **Task** column, a class
+   that is defined in `src/`. This is the rule that would have caught
+   `BybitInstrumentSource`. It is scoped to the Task column deliberately: the other
+   columns legitimately reference things that do exist, and a rule that fired on those
+   would be a false positive machine.
+3. Every task row names both what constructs it and what it feeds, which is the rule the
+   director already imposed in prose and which nothing enforced.
+
+**What it deliberately does not attempt.** It cannot catch a row that says Complete while
+the component is unreached, because reachability is what the constructed-by column exists
+to state and a test that inferred it would be a second, weaker implementation of the call
+graph. It also does not apply to `docs/DECISIONS.md`, which is append-only: a decision
+that names a file deleted afterwards is still an accurate record of that decision, and a
+gate there would force editing history to satisfy a test.
+
+**The honest limit: this makes some false rows fail, not all of them.** The tracker is
+still mostly trusted prose. What changed is that the two cheapest classes of drift, a
+stale path and a deliverable claimed absent while its class exists, now stop the suite
+rather than waiting for someone to trace the call graph again.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited
