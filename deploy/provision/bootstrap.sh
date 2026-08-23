@@ -126,12 +126,78 @@ fi
 # ---------------------------------------------------------------------------
 step "creating the data directories"
 # ---------------------------------------------------------------------------
-sudo mkdir -p "${DATA_ROOT}/postgres" "${DATA_ROOT}/captures"
-# The postgres image runs as uid 999. The bind mount carries host ownership straight
-# through, so without this the container cannot write its own data directory.
-sudo chown 999:999 "${DATA_ROOT}/postgres"
+# THE UID IS ASKED FOR, NEVER ASSERTED. This block used to say "the postgres image runs
+# as uid 999" in a comment and chown to 999 in the line below it. The comment was wrong,
+# the image runs as 70, and nothing could ever have caught the disagreement because the
+# assumption and the code implementing it were the same idea written twice. Hardcoding
+# 70 instead would break identically on the next image change, and the tag is already
+# pinned in compose, so the image is the one place that knows.
+DB_IMAGE="$(docker compose \
+    -f "${REPO_ROOT}/docker-compose.yml" \
+    -f "${REPO_ROOT}/deploy/provision/docker-compose.prod.yml" \
+    config --format json 2>/dev/null |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["db"]["image"])' 2>/dev/null)"
+if [[ -z "$DB_IMAGE" ]]; then
+    echo "error: could not read the database image out of the compose files." >&2
+    echo "Without it the uid the data directory must be owned by is unknown, and" >&2
+    echo "guessing it is what broke this host on 2026-08-24." >&2
+    exit 1
+fi
+
+PG_UID="$(docker run --rm --entrypoint id "$DB_IMAGE" -u postgres 2>/dev/null)"
+PG_GID="$(docker run --rm --entrypoint id "$DB_IMAGE" -g postgres 2>/dev/null)"
+if ! [[ "$PG_UID" =~ ^[0-9]+$ && "$PG_GID" =~ ^[0-9]+$ ]]; then
+    echo "error: ${DB_IMAGE} did not report a numeric uid and gid for its postgres user." >&2
+    echo "Got uid='${PG_UID}' gid='${PG_GID}'." >&2
+    echo "There is deliberately no fallback value here: a wrong number is exactly the" >&2
+    echo "defect this lookup replaces, and it fails silently at the next start." >&2
+    exit 1
+fi
+echo "${DB_IMAGE} runs postgres as ${PG_UID}:${PG_GID}"
+
+sudo mkdir -p "${DATA_ROOT}/captures"
 sudo chown "${SERVICE_USER}:${SERVICE_USER}" "${DATA_ROOT}/captures"
-echo "postgres data: ${DATA_ROOT}/postgres"
+
+PGDATA_DIR="${DATA_ROOT}/postgres"
+if [[ -e "${PGDATA_DIR}/PG_VERSION" ]]; then
+    # AN EXISTING CLUSTER IS VERIFIED, NEVER CHOWNED. The previous version chowned on
+    # every run, which meant a converge run landed on a live postmaster: its open files
+    # kept working while every new backend failed to open global/pg_filenode.map, and
+    # the container healthcheck could not see the difference. Changing ownership under a
+    # running database is not a repair, it is the fault.
+    OWNER_UID="$(sudo stat -c '%u' "$PGDATA_DIR")"
+    if [[ "$OWNER_UID" != "$PG_UID" ]]; then
+        echo "error: ${PGDATA_DIR} holds a database cluster owned by uid ${OWNER_UID}," >&2
+        echo "and ${DB_IMAGE} runs postgres as ${PG_UID}. Postgres cannot traverse a" >&2
+        echo "directory it does not own, so it would start, report healthy, and fail" >&2
+        echo "every connection with a permission error." >&2
+        echo >&2
+        echo "This script refuses rather than fixing it, because the safe repair depends" >&2
+        echo "on whether the database is running and only you know that. With the stack" >&2
+        echo "stopped:" >&2
+        echo >&2
+        echo "  sudo systemctl stop tradingsys.service" >&2
+        echo "  sudo chown -R ${PG_UID}:${PG_GID} ${PGDATA_DIR}" >&2
+        echo "  deploy/provision/bootstrap.sh" >&2
+        echo >&2
+        echo "The image also repairs ownership itself at container start, because its" >&2
+        echo "entrypoint runs as root and chowns what it does not own, so restarting the" >&2
+        echo "db service is an alternative to the chown above." >&2
+        exit 1
+    fi
+    echo "postgres data: ${PGDATA_DIR}, existing cluster owned by ${OWNER_UID}, unchanged"
+elif [[ -d "$PGDATA_DIR" ]] && [[ -n "$(sudo ls -A "$PGDATA_DIR")" ]]; then
+    echo "error: ${PGDATA_DIR} is not empty and holds no PG_VERSION, so it is not a" >&2
+    echo "Postgres data directory this script recognises. Refusing to touch it." >&2
+    sudo ls -la "$PGDATA_DIR" >&2
+    exit 1
+else
+    # Fresh. Created with the ownership initdb needs rather than corrected afterwards.
+    sudo mkdir -p "$PGDATA_DIR"
+    sudo chown "${PG_UID}:${PG_GID}" "$PGDATA_DIR"
+    sudo chmod 700 "$PGDATA_DIR"
+    echo "postgres data: ${PGDATA_DIR}, created empty and owned by ${PG_UID}:${PG_GID}"
+fi
 echo "capture output: ${DATA_ROOT}/captures"
 
 # ---------------------------------------------------------------------------

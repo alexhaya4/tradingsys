@@ -163,6 +163,19 @@ written, wired, tested, and never reaches the host.
 **It does not format and it does not mount.** Removing `mkfs` also removed the only line
 in the script that could destroy recorded history.
 
+**It asks the image which uid the data directory must be owned by, and it refuses rather
+than repairing an existing cluster.** The uid was written into a comment as 999 for five
+days while the image ran as 70, and nothing could catch the disagreement because the
+assumption and the code implementing it were the same idea written twice. The image is
+now asked, through the tag compose already pins.
+
+On an existing cluster it verifies and stops. Chowning underneath a running postmaster is
+not a repair: its open files keep working while every new backend fails to open
+`global/pg_filenode.map`, which is how this host spent a day reporting healthy and
+serving nothing. If it refuses, it prints the repair, which is a `chown -R` with the
+stack stopped. Restarting the `db` service is an alternative, because the image's own
+entrypoint runs as root and chowns what it does not own at start.
+
 ## 5. Verify
 
 ```bash
@@ -174,6 +187,13 @@ many days of runway are left, the unit is enabled so the stack returns after a r
 the containers are up, liveness and readiness answer, the metrics carry
 `tradingsys_build_info`, the migrations are at head, the venue is reachable, and the
 clock is sane. Each reports why it failed, not only that it did.
+
+**The `db` healthcheck runs a query rather than `pg_isready`.** Everything downstream
+reads that one result: compose's `depends_on: service_healthy`, the systemd unit's
+`up -d --wait`, and `assert_healthy.sh`. `pg_isready` reports that the postmaster answered
+a connection attempt, which stays true of a server whose every backend fails, and on
+2026-08-24 it reported "accepting connections" for hours beside "could not open file
+global/pg_filenode.map: Permission denied" from every client.
 
 `healthcheck.sh` is the operator's check, run by hand. The two assertions below are the
 unattended ones, run by timers, and they are what alert:

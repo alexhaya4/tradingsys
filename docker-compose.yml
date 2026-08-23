@@ -54,8 +54,26 @@ services:
       - "127.0.0.1:5432:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
+    # A QUERY, NOT A CONNECTION ATTEMPT. pg_isready reports that the postmaster answered,
+    # which it does while every backend fails: on 2026-08-24 a data directory Postgres
+    # could not traverse produced "accepting connections" from pg_isready and
+    # "could not open file global/pg_filenode.map: Permission denied" from every client,
+    # for hours. Reproduced against this exact image before this line was changed.
+    #
+    # Everything downstream inherits whatever this asserts: compose's own
+    # depends_on: service_healthy, the systemd unit's up -d --wait, and
+    # assert_healthy.sh all read this one result. So it runs a real query as the
+    # application user, which forks a backend and reads the catalogue, and that is the
+    # step pg_isready skips.
+    #
+    # The user and database come from the container's own environment rather than being
+    # written again here, and the query is SELECT 1 rather than a table read: coupling
+    # the healthcheck to a migration having run would make a correctly empty database
+    # unhealthy.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U tradingsys -d tradingsys"]
+      test:
+        - CMD-SHELL
+        - 'psql -qtAX -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "SELECT 1" > /dev/null'
       interval: 5s
       timeout: 3s
       retries: 10

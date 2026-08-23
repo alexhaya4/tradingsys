@@ -1791,6 +1791,85 @@ The `--skip-start` path says out loud that they are enabled and not running, and
 command to arm them, because a check that exists and is not running is the other half of
 the same defect.
 
+### Where code depends on an external system's property, derive the property
+
+Directed by the director on 2026-08-24, from the comment at `bootstrap.sh` line 130, and
+the point is that **the comment was the defect rather than the chown**.
+
+```
+# The postgres image runs as uid 999.
+sudo chown 999:999 "${DATA_ROOT}/postgres"
+```
+
+The image runs as 70. The two lines are the same idea written twice, an assertion about
+an external system and the code implementing that assertion, so there was never anything
+to compare them against and no test could have caught the disagreement. What eventually
+caught it was a database that reported healthy and could not open its own files.
+
+**Replacing 999 with 70 would not have fixed it.** It would have been correct today and
+would break identically at the next image change, with the same absence of anything able
+to notice. The number is a fact about a container image, the tag is already pinned in
+compose, and the image is therefore the one place that knows: the script reads the image
+out of the compose definition and asks it, with no fallback value, because a fallback is
+the same defect with a longer fuse.
+
+**The general rule.** Where code depends on an external system's property, derive the
+property at the point of use. A comment stating it is not a mitigation, for the same
+reason a docstring describing a failure mode was not a mitigation of the startup
+deadlock: writing the assumption down discharges the feeling of having handled it while
+leaving nothing that checks it.
+
+This is the third form of one habit. `find_gaps` was a capability nothing called, the
+counters were values nothing read, and this was a fact nothing verified. In each case the
+missing piece was the edge, not the endpoint.
+
+### An existing cluster is verified, never chowned, because the repair depends on state the script cannot see
+
+Decided 2026-08-24, alongside the uid.
+
+Chowning a data directory on every converge run was harmless for five days because the
+image repairs ownership at container start: its entrypoint runs as root and chowns what
+it does not own. Reproduced against the pinned image, including the repair on restart.
+
+It stopped being harmless the moment it ran while the database was up. The chown landed
+under a live postmaster, whose already open files kept working while every newly forked
+backend failed, so the container went on reporting healthy and every client saw
+`could not open file "global/pg_filenode.map": Permission denied`. **Changing ownership
+underneath a running database is not a repair, it is the fault.**
+
+So bootstrap verifies and refuses. The safe repair differs depending on whether the
+database is running, and only the operator knows that, which makes refusing with the
+command printed the correct behaviour rather than a cautious one. A fresh directory is
+still created with the ownership `initdb` needs, because that case has no running server
+to disturb.
+
+### The database healthcheck asserts serving, because everything downstream reads it
+
+Decided 2026-08-24, the seventh instance of the liveness class and the second in the
+deployment layer in one day.
+
+`pg_isready` reports that the postmaster answered a connection attempt. That remains true
+of a server whose every backend dies during startup, which is exactly what a data
+directory Postgres cannot traverse produces. Reproduced against the pinned image before
+the line was changed: `pg_isready` exits 0 with "accepting connections" while `psql`
+fails with the permission error.
+
+**The reason this one matters more than its size.** Compose's `depends_on:
+service_healthy`, the systemd unit's `up -d --wait`, and `assert_healthy.sh` all read
+this single result. One check that proves less than it appears to was inherited by three
+layers of supervision built specifically to be honest, and each of them faithfully
+reported a database that could not serve as healthy.
+
+It now runs `SELECT 1` as the application user, which forks a backend and reads the
+catalogue, which is the step `pg_isready` skips. The user and database come from the
+container's own environment rather than being written a second time. It deliberately does
+not read a table: coupling the healthcheck to a migration having run would make a
+correctly empty database unhealthy and stop the first provision of every new host.
+
+Verified by breaking a real database and watching it flip: healthy, ownership changed
+underneath it, unhealthy about fifty five seconds later with the permission error in the
+health log, then healthy again after a restart repaired ownership.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited

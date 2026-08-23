@@ -180,6 +180,16 @@ def script_env(
     return env
 
 
+def executable_lines(path: Path) -> list[str]:
+    """The lines of a script or compose file with comments removed.
+
+    Every rule below matches text, and the text these files carry includes long comments
+    describing the defects the rules exist to prevent. Matching those is a check firing on
+    its own documentation.
+    """
+    return [line for line in path.read_text().splitlines() if not line.strip().startswith("#")]
+
+
 def run(script: Path, *args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(script), *args],
@@ -582,6 +592,84 @@ class TestTheSchedules:
     def test_the_recording_assertion_runs_on_its_own_threshold(self) -> None:
         timer = (PROVISION / "tradingsys-recording.timer").read_text()
         assert "OnUnitActiveSec=5min" in timer
+
+
+class TestTheProvisioningScriptAsksRatherThanAsserts:
+    """The uid the data directory must be owned by is derived, never written down.
+
+    The comment said 999 and the image runs as 70. The assumption and the code
+    implementing it were the same idea written twice, so no test could have caught the
+    disagreement, and the only witness was a database that reported healthy and could not
+    open its files. Hardcoding 70 instead would fail identically at the next image change.
+    """
+
+    def test_the_image_is_read_from_the_compose_definition(self) -> None:
+        body = BOOTSTRAP.read_text()
+        assert "config --format json" in body, (
+            "the database image must come from the compose files, which already pin the "
+            "tag, rather than being named a second time here"
+        )
+        assert 'services"]["db"]["image"' in body
+
+    def test_the_uid_comes_from_the_image(self) -> None:
+        body = BOOTSTRAP.read_text()
+        assert 'id "$DB_IMAGE" -u postgres' in body
+        assert 'id "$DB_IMAGE" -g postgres' in body
+
+    def test_no_uid_is_written_into_the_script(self) -> None:
+        # The specific numbers that have been wrong or would be next: 999 was asserted in
+        # a comment and was wrong, 70 is right today and is exactly as unverifiable.
+        #
+        # Comments are stripped before matching. The first version of this test failed on
+        # the comment explaining the defect, which is a check firing on its own
+        # documentation, and a check that cannot tell prose from code is one nobody keeps.
+        chowns = [
+            line
+            for line in executable_lines(BOOTSTRAP)
+            if "chown" in line and re.search(r"\b(999|70)\b", line)
+        ]
+        assert not chowns, f"a uid is hardcoded in a chown again: {chowns}"
+
+    def test_an_existing_cluster_is_verified_rather_than_chowned(self) -> None:
+        # Chowning under a live postmaster is not a repair, it is the fault: open files
+        # keep working while every new backend fails.
+        body = BOOTSTRAP.read_text()
+        assert "PG_VERSION" in body, "an existing cluster has to be recognised as one"
+        assert "refuses rather than fixing it" in body
+
+    def test_the_refusal_names_the_repair(self) -> None:
+        body = BOOTSTRAP.read_text()
+        assert "chown -R ${PG_UID}:${PG_GID} ${PGDATA_DIR}" in body
+        assert "systemctl stop tradingsys.service" in body
+
+
+class TestTheDatabaseHealthcheckAssertsServing:
+    """It reported healthy for hours while every connection failed.
+
+    pg_isready proves the postmaster answered a connection attempt, and that is true of a
+    server whose backends cannot start. Everything downstream reads this one result:
+    compose's depends_on, the systemd unit's up -d --wait, and assert_healthy.sh.
+    """
+
+    def test_it_runs_a_query(self) -> None:
+        compose = "\n".join(executable_lines(REPO_ROOT / "docker-compose.yml"))
+        assert "pg_isready" not in compose, (
+            "pg_isready answers for a database that cannot serve; the healthcheck has to "
+            "fork a backend and read the catalogue"
+        )
+        assert "SELECT 1" in compose
+
+    def test_the_user_and_database_are_not_written_twice(self) -> None:
+        compose = (REPO_ROOT / "docker-compose.yml").read_text()
+        assert '-U "$$POSTGRES_USER"' in compose
+        assert '-d "$$POSTGRES_DB"' in compose
+
+    def test_it_does_not_depend_on_a_migration_having_run(self) -> None:
+        # A table read would make a correctly empty database unhealthy, which would stop
+        # the first provision of any new host.
+        compose = (REPO_ROOT / "docker-compose.yml").read_text()
+        for table in ("instruments", "ticks", "ohlcv_bars", "audit_log"):
+            assert f"FROM {table}" not in compose
 
 
 class TestDefinitionsThatExistTwiceAgree:
