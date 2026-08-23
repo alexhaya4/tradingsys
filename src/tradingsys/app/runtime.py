@@ -217,6 +217,7 @@ class Application:
             market_data=self.market_data,
             audit_log=self.audit_log,
             currencies=self.currencies,
+            metrics=self.metrics,
         )
         # Registered on readiness rather than liveness: a stalled ingest should stop this
         # process being given work and should not by itself trigger a restart, because

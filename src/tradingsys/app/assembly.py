@@ -26,6 +26,7 @@ import websockets
 
 from tradingsys.app.gapcheck import GapMonitor
 from tradingsys.app.ingest import IngestPlan, IngestProcess
+from tradingsys.app.statsreport import StatsReporter
 from tradingsys.core.errors import TradingSysError
 from tradingsys.core.instrument import InstrumentId
 from tradingsys.core.provenance import TickSource
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
     from tradingsys.core.currency import CurrencyRegistry
     from tradingsys.core.instrument import Instrument
     from tradingsys.marketdata.registry import InstrumentSource
+    from tradingsys.observability.metrics import Metrics
     from tradingsys.persistence.audit import AuditLog
     from tradingsys.persistence.database import Database
     from tradingsys.persistence.repositories import InstrumentRepository, MarketDataRepository
@@ -100,6 +102,7 @@ async def assemble_ingest(
     market_data: MarketDataRepository,
     audit_log: AuditLog,
     currencies: CurrencyRegistry,
+    metrics: Metrics,
     connect: Connect | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> AssembledIngest:
@@ -187,6 +190,19 @@ async def assemble_ingest(
         settings=settings.ingest,
     )
 
+    # The counters both of these already keep, published where something can read them.
+    # Constructed here rather than inside either component because it spans the two: the
+    # question an operator asks is how many quotes arrived against how many were stored,
+    # and neither side can answer it alone.
+    stats = StatsReporter(
+        stream=stream.stats,
+        recorder=recorder.stats,
+        metrics=metrics,
+        venue=CRYPTO_VENUE,
+        stream_name="orderbook.1",
+        source=TickSource.BYBIT.value,
+    )
+
     process = IngestProcess(
         IngestPlan.from_settings(settings.ingest),
         clock,
@@ -196,6 +212,7 @@ async def assemble_ingest(
         quotes=stream.quotes,
         backfill=backfill_jobs,
         gaps=monitor,
+        stats=stats,
         row_ids=row_ids,
     )
     logger.info(

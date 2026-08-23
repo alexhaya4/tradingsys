@@ -939,6 +939,12 @@ this host cannot answer the question: five TCP connects to one endpoint ranged f
 produces exactly that dataset, and running the same recorder in two regions for a week
 and comparing those counters is the experiment if the question is ever reopened.
 
+**Correction, 2026-08-23: the second sentence was false when written and is now true.**
+The counters existed and nothing read them, so the run would have produced that dataset
+inside a process that discarded it on exit. The paragraph is left as written because this
+file is append-only, and the entry below records what was wrong and what was done about
+it. Read it before relying on the sentence above.
+
 ### The recorder deploys to DigitalOcean Singapore, and the region is revisitable
 
 Decided by the director on 2026-08-18.
@@ -1622,6 +1628,52 @@ gate there would force editing history to satisfy a test.
 still mostly trusted prose. What changed is that the two cheapest classes of drift, a
 stale path and a deliverable claimed absent while its class exists, now stop the suite
 rather than waiting for someone to trace the call graph again.
+
+### A counter that nothing reads is not evidence, and one entry here claimed otherwise
+
+Found 2026-08-23 while listing what the crypto run should capture, and corrected the same
+day at the director's instruction rather than left standing.
+
+**What was wrong.** The region decision above closes by saying that `StreamStats` records
+the counters that would settle the question and that the 72 hour run produces exactly that
+dataset. The first half was true. The second was not: `BybitPublicStream` and
+`QuoteRecorder` contain no logging at all, the two Prometheus series declared for stream
+activity had no code that incremented them, and neither counter set reached health output.
+Both objects were incremented faithfully for the process's lifetime and then discarded,
+and a restart reset them.
+
+**Why it matters more than an ordinary defect.** This file is what a recovering session
+reads to avoid re-deriving decisions, so a sentence here asserting evidence that does not
+exist is worse than no sentence: it would be relied on precisely by someone not in a
+position to check it. `SPEC.md` phase 2 also requires reconnection to be tested under
+forced network failure and gap detection to be proven by deliberate disconnection, and the
+counters are a large part of how either would be shown.
+
+**The class it belongs to.** It is the unreached component again, in its fifth and sixth
+appearance, with the direction reversed. The earlier cases were components nothing
+constructed. These are values something produced and nothing consumed. Both are edges that
+do not exist between endpoints that do, and both survived review because each endpoint was
+individually correct and complete.
+
+**What was done.** `app/statsreport.py` publishes both counter sets on an interval, as a
+supervised activity like everything else, to two consumers that fail differently.
+Prometheus holds the series over time and is what a question about last week is answered
+from. The log line holds what a metric cannot: the last error string, the most recent
+reconnect delay, and which symbols arrived for instruments the registry does not know.
+
+Three details are decisions rather than implementation. Deltas are computed in the
+reporter, because a Prometheus counter may only be incremented and these are absolute
+values; a process restart then resets both sides at once, which is what a counter reset
+means and what `rate()` handles. Reconnects are derived as `connections - 1` rather than
+counted separately, because the first connection is not a reconnect and two counters for
+one fact drift. The last write is exposed as an instant rather than an age, so the age is
+computed at query time and a stopped exporter shows an age that keeps growing rather than
+one frozen at whatever it last published.
+
+**Unknown instrument symbols are counted without a symbol label.** An unknown symbol is by
+definition an unexpected value, and unexpected values as label values are unbounded
+cardinality, which is how a metrics endpoint becomes the outage. The total is a metric and
+the symbols go to the log line.
 
 ---
 

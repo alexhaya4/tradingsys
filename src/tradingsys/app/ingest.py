@@ -5,10 +5,11 @@ and writing it to the store. This is that process, assembled from the components
 during phase 2 and supervised on progress rather than on liveness.
 
 **What it runs.** A registry sync so instrument definitions come from the venues and
-their drift is reported, a crypto quote stream into the tick recorder, and a periodic
-Dukascopy backfill over the hours the gap detector finds missing. Each is a supervised
-activity with its own progress deadline, so one stalling is visible as itself rather than
-as a quiet reduction in throughput.
+their drift is reported, a crypto quote stream into the tick recorder, a periodic
+Dukascopy backfill over the hours the gap detector finds missing, and a counter export so
+that what the stream and the recorder saw is readable from outside the process. Each is a
+supervised activity with its own progress deadline, so one stalling is visible as itself
+rather than as a quiet reduction in throughput.
 
 **What it does not run yet, and why that is stated rather than hidden.** There is no
 forex quote stream. cTrader spot subscription is a protocol path this client does not
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
     from tradingsys.app.gapcheck import GapMonitor
+    from tradingsys.app.statsreport import StatsReporter
     from tradingsys.config.settings import IngestSettings
     from tradingsys.core.clock import Clock
     from tradingsys.core.instrument import InstrumentId
@@ -69,6 +71,8 @@ class IngestPlan:
             quiet market.
         registry_deadline: Longest between completed registry syncs.
         backfill_deadline: Longest between completed backfill passes.
+        stats_interval: How often the stream and recorder counters are published.
+        stats_deadline: Longest between completed publications.
     """
 
     registry_interval: timedelta
@@ -79,6 +83,8 @@ class IngestPlan:
     backfill_deadline: timedelta
     gap_interval: timedelta
     gap_deadline: timedelta
+    stats_interval: timedelta
+    stats_deadline: timedelta
 
     @classmethod
     def from_settings(cls, settings: IngestSettings) -> IngestPlan:
@@ -98,6 +104,8 @@ class IngestPlan:
             backfill_deadline=timedelta(seconds=settings.backfill_deadline_seconds),
             gap_interval=timedelta(seconds=settings.gap_interval_seconds),
             gap_deadline=timedelta(seconds=settings.gap_deadline_seconds),
+            stats_interval=timedelta(seconds=settings.stats_interval_seconds),
+            stats_deadline=timedelta(seconds=settings.stats_deadline_seconds),
         )
 
 
@@ -115,6 +123,7 @@ class IngestProcess:
         "_registry",
         "_row_ids",
         "_sources",
+        "_stats",
         "_supervisor",
     )
 
@@ -129,6 +138,7 @@ class IngestProcess:
         quotes: Callable[[], AsyncIterator[Quote]],
         backfill: Sequence[BackfillJob] = (),
         gaps: GapMonitor | None = None,
+        stats: StatsReporter | None = None,
         row_ids: Mapping[InstrumentId, int] | None = None,
     ) -> None:
         self._plan = plan
@@ -139,6 +149,7 @@ class IngestProcess:
         self._quotes = quotes
         self._backfill = tuple(backfill)
         self._gaps = gaps
+        self._stats = stats
         self._row_ids = dict(row_ids or {})
         self._supervisor = Supervisor(clock)
 
@@ -186,6 +197,16 @@ class IngestProcess:
                     name="gap_detection",
                     run=self._run_gap_detection,
                     progress_deadline=self._plan.gap_deadline,
+                    restart_backoff=5.0,
+                    max_restart_backoff=300.0,
+                )
+            )
+        if self._stats is not None:
+            self._supervisor.register(
+                SupervisedActivity(
+                    name="stats_export",
+                    run=self._run_stats,
+                    progress_deadline=self._plan.stats_deadline,
                     restart_backoff=5.0,
                     max_restart_backoff=300.0,
                 )
@@ -252,6 +273,21 @@ class IngestProcess:
                     )
             progress()
             await asyncio.sleep(self._plan.backfill_interval.total_seconds())
+
+    async def _run_stats(self, progress: Callable[[], None]) -> None:
+        """Publish the stream and recorder counters on an interval, forever.
+
+        Supervised like everything else, because an exporter that dies silently returns
+        the system to the state this activity was written to end: counters incremented
+        and read by nobody. It is deliberately the last activity registered, so a failure
+        here is visibly about observation rather than about ingestion.
+        """
+        if self._stats is None:  # pragma: no cover - registration guards this
+            return
+        while True:
+            logger.info("ingest counters", **self._stats.report())
+            progress()
+            await asyncio.sleep(self._plan.stats_interval.total_seconds())
 
     async def _run_gap_detection(self, progress: Callable[[], None]) -> None:
         """Look for gaps on an interval, forever.

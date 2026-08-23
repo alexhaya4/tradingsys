@@ -162,6 +162,13 @@ gap_max_quiet_seconds = 10.0
 # minimum would claim a sensitivity the coverage calculation cannot deliver.
 gap_minimum_seconds = 60.0
 
+# How often the stream and recorder counters are published. They are in-memory absolute
+# values and they reset when the process does, so this is the resolution at which the
+# record survives a crash. One minute over a 72 hour run is 4,320 observations, which is
+# a series worth querying and a log volume of a few hundred kilobytes a day.
+stats_interval_seconds = 60.0
+stats_deadline_seconds = 180.0
+
 [venues.forex]
 # cTrader Open API, reached through Pepperstone. See PROGRESS.md for why this is
 # cTrader rather than OANDA.

@@ -44,6 +44,8 @@ def plan(**overrides: timedelta) -> IngestPlan:
         "backfill_deadline": timedelta(minutes=90),
         "gap_interval": timedelta(minutes=15),
         "gap_deadline": timedelta(minutes=30),
+        "stats_interval": timedelta(minutes=1),
+        "stats_deadline": timedelta(minutes=3),
     }
     defaults.update(overrides)
     return IngestPlan(**defaults)
@@ -155,6 +157,8 @@ class TestPlanFromSettings:
             gap_settle_seconds=120.0,
             gap_max_quiet_seconds=10.0,
             gap_minimum_seconds=60.0,
+            stats_interval_seconds=60.0,
+            stats_deadline_seconds=180.0,
         )
         built = IngestPlan.from_settings(settings)
 

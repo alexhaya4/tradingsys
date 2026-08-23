@@ -95,6 +95,8 @@ gap_window_seconds = 7200.0
 gap_settle_seconds = 120.0
 gap_max_quiet_seconds = 10.0
 gap_minimum_seconds = 60.0
+stats_interval_seconds = 60.0
+stats_deadline_seconds = 180.0
 """
 
 

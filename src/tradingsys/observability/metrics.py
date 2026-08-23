@@ -28,7 +28,7 @@ from prometheus_client import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
 
 __all__ = ["METRICS_CONTENT_TYPE", "Metrics"]
 
@@ -84,6 +84,13 @@ class Metrics:
     venue_request_duration: Histogram
     venue_stream_events: Counter
     venue_stream_reconnects: Counter
+    venue_stream_incidents: Counter
+
+    recorder_quotes: Counter
+    recorder_flushes: Counter
+    recorder_unknown_instrument_quotes: Counter
+    recorder_buffered_quotes: Gauge
+    recorder_last_write_timestamp: Gauge
 
     db_queries: Counter
     db_query_duration: Histogram
@@ -176,6 +183,49 @@ class Metrics:
                 ("venue", "stream"),
                 registry=target,
             ),
+            venue_stream_incidents=Counter(
+                "tradingsys_venue_stream_incidents_total",
+                "Stream events that are not quotes, by kind: resync, silence timeout, "
+                "rejected message, connection failure.",
+                ("venue", "stream", "kind"),
+                registry=target,
+            ),
+            recorder_quotes=Counter(
+                "tradingsys_recorder_quotes_total",
+                "Quotes the recorder handled, by source and by whether they reached storage.",
+                ("source", "outcome"),
+                registry=target,
+            ),
+            recorder_flushes=Counter(
+                "tradingsys_recorder_flushes_total",
+                "Recorder flushes to storage, by source and outcome.",
+                ("source", "outcome"),
+                registry=target,
+            ),
+            recorder_unknown_instrument_quotes=Counter(
+                "tradingsys_recorder_unknown_instrument_quotes_total",
+                "Quotes discarded because their instrument is not in the registry. The "
+                "symbol is deliberately not a label: an unknown symbol is by definition "
+                "an unexpected value, and unexpected values as labels are unbounded "
+                "cardinality. The symbols are in the log line.",
+                ("source",),
+                registry=target,
+            ),
+            recorder_buffered_quotes=Gauge(
+                "tradingsys_recorder_buffered_quotes",
+                "Quotes received and not yet written. Data this process claims to have "
+                "and would lose if it died now.",
+                ("source",),
+                registry=target,
+            ),
+            recorder_last_write_timestamp=Gauge(
+                "tradingsys_recorder_last_write_timestamp_seconds",
+                "Unix time of the last successful write. Exposed as an instant rather "
+                "than an age, so that the age is computed at query time and a stopped "
+                "exporter cannot report a freshness it is no longer observing.",
+                ("source",),
+                registry=target,
+            ),
             db_queries=Counter(
                 "tradingsys_db_queries_total",
                 "Database queries by logical operation and outcome.",
@@ -254,6 +304,57 @@ class Metrics:
         for state in ("size", "idle", "in_use", "max_size"):
             if state in stats:
                 self.db_pool_connections.labels(state=state).set(stats[state])
+
+    def record_stream(
+        self,
+        venue: str,
+        stream: str,
+        *,
+        quotes: int,
+        reconnects: int,
+        incidents: Mapping[str, int],
+    ) -> None:
+        """Publish one observation window of stream activity.
+
+        Deltas, not totals: these are counters, and the caller owns the arithmetic
+        because only it knows what it saw last.
+        """
+        if quotes:
+            self.venue_stream_events.labels(venue=venue, stream=stream).inc(quotes)
+        if reconnects:
+            self.venue_stream_reconnects.labels(venue=venue, stream=stream).inc(reconnects)
+        for kind, count in incidents.items():
+            if count:
+                self.venue_stream_incidents.labels(venue=venue, stream=stream, kind=kind).inc(count)
+
+    def record_recorder(
+        self,
+        source: str,
+        *,
+        received: int,
+        written: int,
+        flushes: int,
+        write_failures: int,
+        unknown_instrument_quotes: int,
+        buffered: int,
+        last_write_epoch: float | None,
+    ) -> None:
+        """Publish one observation window of recorder activity."""
+        if received:
+            self.recorder_quotes.labels(source=source, outcome="received").inc(received)
+        if written:
+            self.recorder_quotes.labels(source=source, outcome="written").inc(written)
+        if flushes:
+            self.recorder_flushes.labels(source=source, outcome="ok").inc(flushes)
+        if write_failures:
+            self.recorder_flushes.labels(source=source, outcome="failed").inc(write_failures)
+        if unknown_instrument_quotes:
+            self.recorder_unknown_instrument_quotes.labels(source=source).inc(
+                unknown_instrument_quotes
+            )
+        self.recorder_buffered_quotes.labels(source=source).set(buffered)
+        if last_write_epoch is not None:
+            self.recorder_last_write_timestamp.labels(source=source).set(last_write_epoch)
 
     def record_audit_entry(self, category: str) -> None:
         self.audit_entries.labels(category=category).inc()

@@ -38,6 +38,7 @@ from tradingsys.core.money import Money
 from tradingsys.core.provenance import TickSource
 from tradingsys.core.schedule import TradingSchedule
 from tradingsys.observability.health import HealthRegistry
+from tradingsys.observability.metrics import Metrics
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -157,6 +158,7 @@ async def assembled(
     instruments: InstrumentRepository,
     market_data: MarketDataRepository,
     audit_log: AuditLog,
+    ingest_metrics: Metrics,
 ) -> AsyncIterator[tuple[AssembledIngest, ScriptedSocket, int]]:
     socket = ScriptedSocket([snapshot()])
 
@@ -176,6 +178,7 @@ async def assembled(
         market_data=market_data,
         audit_log=audit_log,
         currencies=default_registry,
+        metrics=ingest_metrics,
         connect=connect,
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(venue_responses())),
     )
@@ -184,6 +187,17 @@ async def assembled(
     finally:
         await ingest.process.stop()
         await ingest.aclose()
+
+
+@pytest.fixture
+def ingest_metrics() -> Metrics:
+    """The registry the assembled process publishes to.
+
+    A fixture rather than an inline construction so a test can read what the running
+    process exported. Counters that only the process can see are the defect this wiring
+    exists to end.
+    """
+    return Metrics.create(service="tradingsys", environment="test", version="0")
 
 
 class TestItStartsFromAnEmptyDatabase:
@@ -293,6 +307,46 @@ class TestAQuoteReachesTheDatabase:
 
         assert socket.sent
         assert any(VENUE_SYMBOL in message for message in socket.sent)
+
+
+class TestTheCountersLeaveTheProcess:
+    """`StreamStats` and `RecorderStats` were maintained from the day they were written
+    and read by nothing, which made a claim in `docs/DECISIONS.md` false: the region
+    decision was recorded against a dataset the 72 hour run was said to produce and in
+    fact discarded. This asserts the export from the outside, through the assembly that
+    the deployment actually runs, because that is where it was missing."""
+
+    async def test_the_export_activity_is_registered(
+        self, assembled: tuple[AssembledIngest, ScriptedSocket, int]
+    ) -> None:
+        ingest, _, _ = assembled
+        ingest.process.register_activities()
+
+        assert "stats_export" in ingest.process.supervisor.states
+
+    async def test_a_quote_that_arrives_is_visible_in_the_metrics(
+        self,
+        assembled: tuple[AssembledIngest, ScriptedSocket, int],
+        ingest_metrics: Metrics,
+    ) -> None:
+        ingest, _, _ = assembled
+        ingest.process.register_activities()
+        ingest.process.start()
+        try:
+            await asyncio.sleep(0.2)
+            received = ingest_metrics.registry.get_sample_value(
+                "tradingsys_recorder_quotes_total", {"source": "bybit", "outcome": "received"}
+            )
+            events = ingest_metrics.registry.get_sample_value(
+                "tradingsys_venue_stream_events_total",
+                {"venue": "bybit", "stream": "orderbook.1"},
+            )
+            assert received is not None, "the recorder counters never reached the metrics"
+            assert received >= 1
+            assert events is not None, "the stream counters never reached the metrics"
+            assert events >= 1
+        finally:
+            await ingest.process.stop()
 
 
 class TestReadiness:

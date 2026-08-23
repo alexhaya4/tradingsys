@@ -289,6 +289,11 @@ class IngestSettings(_Section):
             it is stalled.
         registry_deadline_seconds: Longest between completed registry syncs.
         backfill_deadline_seconds: Longest between completed backfill passes.
+        stats_interval_seconds: How often the stream and recorder counters are published
+            to metrics and to the log. They are absolute values held in memory that reset
+            on restart, so an interval that is long relative to the process lifetime loses
+            the tail of whatever happened before a crash.
+        stats_deadline_seconds: Longest between completed publications.
     """
 
     registry_interval_seconds: PositiveSeconds
@@ -310,6 +315,8 @@ class IngestSettings(_Section):
     gap_settle_seconds: PositiveSeconds
     gap_max_quiet_seconds: PositiveSeconds
     gap_minimum_seconds: PositiveSeconds
+    stats_interval_seconds: PositiveSeconds
+    stats_deadline_seconds: PositiveSeconds
 
     @model_validator(mode="after")
     def _deadlines_exceed_their_intervals(self) -> Self:
@@ -325,6 +332,7 @@ class IngestSettings(_Section):
             ("registry", self.registry_interval_seconds, self.registry_deadline_seconds),
             ("backfill", self.backfill_interval_seconds, self.backfill_deadline_seconds),
             ("gap", self.gap_interval_seconds, self.gap_deadline_seconds),
+            ("stats", self.stats_interval_seconds, self.stats_deadline_seconds),
         )
         for name, interval, deadline in pairs:
             if deadline <= interval:
