@@ -34,7 +34,9 @@ from tradingsys.marketdata.backfill import BackfillPlan, HttpHourFetcher
 from tradingsys.marketdata.backfill_job import BackfillJob
 from tradingsys.marketdata.recorder import QuoteRecorder
 from tradingsys.marketdata.registry import RegistrySync
+from tradingsys.observability.correlation import correlation_id as correlation_scope
 from tradingsys.observability.logging import get_logger
+from tradingsys.persistence.audit import AuditCategory
 from tradingsys.persistence.backfill import BackfillRepository
 from tradingsys.venues.bybit.rest import BybitRestClient
 from tradingsys.venues.bybit.source import BybitInstrumentSource
@@ -45,7 +47,7 @@ from tradingsys.venues.ratelimit import RateLimiter
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from tradingsys.config.settings import Settings
+    from tradingsys.config.settings import InstrumentRef, Settings
     from tradingsys.core.clock import Clock
     from tradingsys.core.currency import CurrencyRegistry
     from tradingsys.core.instrument import Instrument
@@ -148,6 +150,14 @@ async def assemble_ingest(
     registry = RegistrySync(instruments, audit=audit_log)
     await _seed_instruments(registry, sources)
 
+    # Which venues this process can define instruments for, derived from the sources it
+    # just built rather than declared anywhere. Everything else in the configured
+    # universe is deferred, and the deferral reverses on its own the day a source for
+    # that venue is constructed, with no flag to maintain and nothing to remember.
+    populated = frozenset(source.venue for source in sources)
+    deferred = tuple(ref for ref in universe.instruments if ref.venue not in populated)
+    await _report_deferred(deferred, populated=populated, audit=audit_log)
+
     # Row ids for everything recorded live. Read once: they are surrogate keys and do
     # not change, and looking them up per quote would put a query in the hot path.
     row_ids: dict[InstrumentId, int] = {}
@@ -176,7 +186,11 @@ async def assemble_ingest(
     )
 
     backfill_jobs = await _forex_backfill(
-        settings, database=database, instruments=instruments, market_data=market_data
+        settings,
+        database=database,
+        instruments=instruments,
+        market_data=market_data,
+        populated=populated,
     )
 
     monitor = GapMonitor(
@@ -219,6 +233,7 @@ async def assemble_ingest(
         "ingest assembled",
         crypto_instruments=len(row_ids),
         backfill_jobs=len(backfill_jobs),
+        deferred_instruments=[_ref_name(ref) for ref in deferred],
         forex_live_quotes=False,
     )
     return AssembledIngest(process, [rest])
@@ -230,13 +245,23 @@ async def _forex_backfill(
     database: Database,
     instruments: InstrumentRepository,
     market_data: MarketDataRepository,
+    populated: frozenset[str],
 ) -> tuple[BackfillJob, ...]:
-    """One job per instrument that configuration says has a historical feed.
+    """One job per instrument that has both a historical feed and a definition.
 
     An instrument with no historical source gets no job, which is the crypto case and is
     the same fact that makes a crypto gap permanent.
+
+    **An instrument whose venue this process cannot define gets no job either, and that
+    is a deferral rather than a failure.** Dukascopy history is stored against the
+    execution venue's instrument row, because a tick's source is a property of the tick
+    and not of the instrument, so a backfill job needs that venue's definition for the
+    row id it writes against and for the price precision the decoder needs. Building a
+    job for an instrument nothing has ever defined is what stopped a deploy on
+    2026-08-24: the jobs were constructed from configuration alone, and the row lookup
+    then raised on a table the crypto-only seeding had never populated.
     """
-    with_history = settings.universe.with_history()
+    with_history = tuple(ref for ref in settings.universe.with_history() if ref.venue in populated)
     if not with_history:
         return ()
 
@@ -264,6 +289,61 @@ async def _forex_backfill(
         )
         jobs.append(BackfillJob(plan, instrument, queue=queue, fetcher=fetcher, store=market_data))
     return tuple(jobs)
+
+
+def _ref_name(ref: InstrumentRef) -> str:
+    """How a configured instrument is named in a log line or an audit payload."""
+    return str(InstrumentId(venue=ref.venue, symbol=ref.symbol))
+
+
+async def _report_deferred(
+    deferred: Sequence[InstrumentRef],
+    *,
+    populated: frozenset[str],
+    audit: AuditLog,
+) -> None:
+    """Say which configured instruments this process is not handling, and why.
+
+    Silence here would be the worse failure of the two available. A configured
+    instrument that is quietly absent from the running system is indistinguishable from
+    one that is being recorded, which is the same reasoning that makes a changing
+    tradeable set an audited event in `SPEC.md` 6.1 rather than an implementation
+    detail. This is that set changing for a different reason: not what the account can
+    afford, but what this process can define.
+
+    Reported three ways because one is not enough for something nobody is watching for.
+    The log line is what an operator reads during a deploy, the count in `ingest
+    assembled` is what makes it visible without grepping, and the audit entry is the
+    durable record that survives log rotation and can be queried later.
+    """
+    if not deferred:
+        return
+
+    names = [_ref_name(ref) for ref in deferred]
+    venues = sorted({ref.venue for ref in deferred})
+    logger.warning(
+        "configured instruments are deferred because this process has no source for "
+        "their venue, so they are neither recorded nor backfilled",
+        instruments=names,
+        venues=venues,
+        populated_venues=sorted(populated),
+    )
+    with correlation_scope() as trace:
+        await audit.append(
+            correlation_id=trace,
+            category=AuditCategory.SYSTEM,
+            actor="app.assembly",
+            action="instruments_deferred",
+            summary=(
+                f"{len(names)} configured instrument(s) deferred: no instrument source "
+                f"for {', '.join(venues)}"
+            ),
+            payload={
+                "instruments": names,
+                "venues": venues,
+                "populated_venues": sorted(populated),
+            },
+        )
 
 
 async def _require(instruments: InstrumentRepository, venue: str, symbol: str) -> Instrument:

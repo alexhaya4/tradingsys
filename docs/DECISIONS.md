@@ -1475,7 +1475,6 @@ party that can see it.
 Both are the same rule in two places. **A component may only report success it has
 observed**, and an alerting component reporting unobserved success is worse than one that
 reports nothing, because it converts an unknown into a false reassurance.
-
 ### The dead man switch's grace is sized against the canary interval, and a paused check is silently useless
 
 Corrected by the director on 2026-08-23, the day the check was created.
@@ -1674,6 +1673,58 @@ one frozen at whatever it last published.
 definition an unexpected value, and unexpected values as label values are unbounded
 cardinality, which is how a metrics endpoint becomes the outage. The total is a metric and
 the symbols go to the log line.
+
+
+### An instrument whose venue this process cannot define is deferred, and the deferral is derived
+
+Directed by the director on 2026-08-24, after the second deploy failure, which was the
+same class as the startup deadlock one layer along.
+
+**What failed.** `_forex_backfill` built one Dukascopy job per instrument that
+configuration says has a historical feed, and each job needs that instrument's stored
+definition for the row id it writes against and for the price precision the `.bi5`
+decoder needs. The assembly seeds Bybit only, so the four cTrader pairs resolved to
+nothing and assembly raised. The dependency is real rather than incidental: migration
+0002 made a tick's source a property of the tick, so Dukascopy history is stored against
+the **execution venue's** instrument row and genuinely requires that venue's definition.
+
+**Three intents were possible and two are closed.**
+
+*Sync the cTrader source as well* is the architecturally correct answer and is closed on
+this deployment. **cTrader has no unauthenticated metadata path**: the connection that
+lists symbols is the same authenticated connection that submits orders, unlike Bybit,
+where public market data needs no key. The guard agrees, and the branch was read rather
+than assumed to be symmetric: for crypto it keys on credentials, for forex on `enabled
+and environment is LIVE`, and `config/production.toml` sets forex to live. So obtaining
+EUR/USD's price precision would require `allow_live_trading = true`. Holding
+order-capable credentials on a recorder host to read a decimal place is a different
+security posture rather than a convenience. Independently, the access token expires about
+thirty days from issue and the refresh call is unwritten, so it would install a component
+with a known death date.
+
+*Remove `historical_source` from the universe* is rejected. It is a true fact about the
+instrument, it is what makes a forex gap repairable rather than permanent, and deleting
+it would encode one deployment's current state in the file that describes the instrument
+universe. That is the same category error already rejected for a traded flag, and it
+would have to be undone by hand the day forex returns.
+
+*Do not build the jobs* is the answer, **with the deferral derived rather than declared**.
+`InstrumentSource` already exposes `venue`, so the set of venues this process can define
+is computed from the sources it just built, and every configured instrument outside that
+set is deferred. There is no flag to maintain: when a cTrader source is constructed the
+venue enters the set and the backfill jobs and gap coverage appear with no configuration
+edit. It is the same property capital independence already relies on, where an instrument
+re-enters the tradeable set when the balance supports it.
+
+**It is not fatal.** A process that refused to record crypto because forex is deferred
+would trade a working leg for a tidy invariant.
+
+**It is reported three ways**, because one is not enough for something nobody is watching
+for: a warning naming each deferred instrument, a `deferred_instruments` field in the
+`ingest assembled` line, and an audit entry. `SPEC.md` 6.1 already makes a changing
+instrument set an audited event; this is that set changing for a different reason, which
+is not what the account can afford but what the process can define.
+
 
 ---
 

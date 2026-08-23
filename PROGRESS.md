@@ -360,6 +360,7 @@ many missing links.
 | Absence detection | Complete | `canary.sh`, on successful delivery only | External dead man switch, by email | Off this host and off Telegram, because it has to survive the failures it reports |
 | Recording assertion | Complete | `tradingsys-recording.timer`, every five minutes | `OnFailure=`, then Telegram | Tick row age and volume headroom. The SQL is executed by the integration suite against the real schema |
 | Tier 3 alert conditions | Deliberately deferred | Application logs | Nothing, until the run completes | Venue failure rates, reconnect churn, gap findings. Thresholds set before a day of data are guesses |
+| Instrument deferral | Complete | `assemble_ingest`, derived from the sources it built | A warning, the `ingest assembled` line, and an audit entry | Instruments whose venue nothing can define are deferred rather than assembled. Reverses on its own when a source for that venue exists |
 | Ingest counter export | Complete | `assemble_ingest`, run as the `stats_export` activity | Prometheus, and a log line every minute | `StreamStats` and `RecorderStats` were incremented from the day they were written and read by nothing. Fixed 2026-08-23, with the false claim in `docs/DECISIONS.md` corrected in the same change |
 
 ### Outstanding work, in the order it should be done
