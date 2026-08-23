@@ -403,44 +403,57 @@ git status                                        # on phase-2-market-data, clea
 git pull --ff-only origin phase-2-market-data
 git log --oneline -3
 
-# 3. Re-run bootstrap without starting. It installs every unit in deploy/provision,
+# 3. Add any new required value to .env before bootstrap checks for it. A deploy that
+#    introduces one stops here otherwise, halfway through, which is a worse place to
+#    discover it than before starting. The alerting values arrived on 2026-08-23.
+grep -c . .env
+$EDITOR .env
+
+# 4. Re-run bootstrap without starting. It installs every unit in deploy/provision,
 #    re-checks that .env holds no placeholder, and converges the host. Idempotent.
 deploy/provision/bootstrap.sh --skip-start
 
-# 4. Migrations before the restart, never after. The app refuses to start against an
-#    unmigrated database, and step 5 blocks until the app is healthy, so a pending
-#    migration would present as a start timeout rather than as itself.
+# 5. Migrations before the restart, never after. The app refuses to start against an
+#    unmigrated database, and the next step blocks until the app is healthy, so a
+#    pending migration would present as a start timeout rather than as itself.
 set -a; . ./.env; set +a
 export TRADINGSYS_DATA_ROOT=/mnt/tradingsys_db
 docker compose -f docker-compose.yml -f deploy/provision/docker-compose.prod.yml up -d db
 docker compose -f docker-compose.yml -f deploy/provision/docker-compose.prod.yml \
     run --rm app alembic upgrade head
 
-# 5. Restart, not start. On an already active oneshot, start is a no-op that returns
+# 6. Restart, not start. On an already active oneshot, start is a no-op that returns
 #    zero and leaves the old image running. This rebuilds and blocks on --wait until
 #    every service with a healthcheck reports healthy.
 sudo systemctl restart tradingsys.service
 systemctl status tradingsys.service --no-pager
 
-# 6. Assert by hand before handing the assertions back to their timers.
+# 7. Assert by hand before handing the assertions back to their timers.
 deploy/provision/assert_healthy.sh
 deploy/provision/assert_recording.sh
 
-# 7. Confirm the stack is recording, which is a different fact from being healthy.
+# 8. Confirm the stack is recording, which is a different fact from being healthy.
 docker compose -f docker-compose.yml -f deploy/provision/docker-compose.prod.yml \
     exec -T db psql -qtAX -U tradingsys -d tradingsys \
     -c "SELECT source, count(*), max(ts) FROM ticks GROUP BY source"
 
-# 8. Hand the assertions back, and confirm they are actually scheduled.
+# 9. Hand the assertions back, and confirm they are actually scheduled.
 sudo systemctl start tradingsys-health.timer tradingsys-recording.timer
 systemctl list-timers 'tradingsys-*' --no-pager   # NEXT populated for all three
 
-# 9. The operator's full check, and the venue drift check CI cannot do.
+# 10. The operator's full check, and the venue drift check CI cannot do.
 deploy/provision/healthcheck.sh
 uv run python scripts/check_venue_assumptions.py
 ```
 
-Rollback is `git checkout <previous sha>` and step 5 again. It is only that simple when
+Step 7 before step 9 is deliberate. The recording assertion fires as soon as its timer
+starts, and on a host whose database is empty because the app has been crash looping, it
+would fail on the first pass while the stream was still establishing itself. Confirming
+by hand that ticks are landing, and only then handing the assertion to its timer, is the
+difference between a first alert that means something and one that trains you to ignore
+the next.
+
+Rollback is `git checkout <previous sha>` and the restart step again. It is only that simple when
 no migration was applied in between: a schema change is not symmetric, and the downgrade
 has to be run deliberately before the older image starts against a newer schema.
 
