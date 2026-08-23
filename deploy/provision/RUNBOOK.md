@@ -279,19 +279,38 @@ revoked, chat id wrong, Telegram unreachable.
 
 To set it up:
 
-1. Create a check on the dead man switch service with a period of 1 day and a grace of 25
-   hours, notifying by **email**, not Telegram. The channel has to differ from the one it
-   is watching.
+1. Create a check on the dead man switch service with a period of **1 day** and a grace
+   of **25 hours**, notifying by **email**, not Telegram. The channel has to differ from
+   the one it is watching.
+
+   **The grace is sized against the canary interval and it is not a detail.** A grace
+   shorter than the interval alerts on any single delayed send rather than on a broken
+   path, which reproduces inside the alerting layer the exact false positive the whole
+   design is built to avoid. One hour against a daily canary was tried on 2026-08-23 and
+   corrected the same day.
+
 2. Put its ping URL in `.env` as `TRADINGSYS_ALERT_DEADMAN_URL`. Treat it as a secret:
    anyone holding it can suppress the alert by pinging it themselves. That is a
    suppression risk rather than a data risk, which is why a third party is acceptable
    here and would not be in the trading path.
+
 3. Run the canary once by hand and confirm both halves land:
 
 ```bash
 set -a; . ./.env; set +a
 deploy/provision/canary.sh          # a message on your phone, a ping on the switch
 ```
+
+4. **Unpause the check, and confirm on the dashboard that it is running rather than
+   paused.** A paused check accepts pings and reports nothing when they stop, so it is
+   silently useless, which is precisely the failure it exists to prevent: an absence that
+   nobody is watching for looks exactly like a system with nothing to report. Pausing is
+   the right thing to do while nothing is pinging it, and un-pausing is therefore a step
+   in every path that starts the canary, not something to remember afterwards.
+
+   The state to confirm is on the switch's own dashboard, because nothing on this host
+   can see it. `canary.sh` gets HTTP 200 from a paused check exactly as it does from a
+   running one, so a successful ping is not evidence that anyone is watching.
 
 ### Closing the 72 hour run: the cadence changes, both halves together
 
@@ -444,7 +463,19 @@ systemctl list-timers 'tradingsys-*' --no-pager   # NEXT populated for all three
 # 10. The operator's full check, and the venue drift check CI cannot do.
 deploy/provision/healthcheck.sh
 uv run python scripts/check_venue_assumptions.py
+
+# 11. Prove the alerting path rather than assuming the deploy left it working, and
+#     confirm the dead man switch is running rather than paused. A paused check accepts
+#     the ping and reports nothing when it stops.
+deploy/provision/canary.sh
+systemctl list-timers tradingsys-canary.timer --no-pager
+#     Then look at the switch's dashboard. Nothing on this host can see its state.
 ```
+
+Step 11 is not optional on a deploy that changed anything under `deploy/provision`. The
+alerting path is the one component that cannot verify itself, so a deploy that leaves it
+broken looks identical to a deploy that leaves it working until the day something else
+fails and nothing arrives.
 
 Step 7 before step 9 is deliberate. The recording assertion fires as soon as its timer
 starts, and on a host whose database is empty because the app has been crash looping, it

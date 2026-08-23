@@ -1443,6 +1443,62 @@ condition as firing with no send time, so the next occurrence retries immediatel
 of waiting out a cooldown on a message nobody received. That case is the first alert of
 an outage, which is the one that matters most.
 
+### A failed delivery is not a delivery, and a failed canary does not ping
+
+Decided 2026-08-23 while building the path, and recorded at the director's instruction
+because both are cases where the obvious implementation is wrong in the same direction:
+it reports health it has not established.
+
+**A send that failed is recorded as firing with no send time.** The naive alternative
+writes the state file as though the message went, and the cooldown then silences the
+condition for thirty minutes. The occasion that produces this is Telegram refusing during
+the first minute of an outage, so the alert it would swallow is the first alert of that
+outage, which is the one that matters most. Recording the condition without a send time
+means the next pass retries immediately, and the retry costs nothing when delivery is
+working because the path is only taken after a failure.
+
+**The canary does not ping the dead man switch when delivery failed.** Pinging anyway
+would report the path healthy for precisely as long as it was broken, which inverts the
+one property the switch exists to provide. It also destroys the design's central
+guarantee, that a single missing ping covers every failure mode at once: the moment the
+ping is sent on anything other than a confirmed delivery, the set of failures it covers
+shrinks to the ones that stop the host. The canary therefore exits non-zero, says in the
+journal that the ping was deliberately withheld, and lets the absence be reported by the
+party that can see it.
+
+Both are the same rule in two places. **A component may only report success it has
+observed**, and an alerting component reporting unobserved success is worse than one that
+reports nothing, because it converts an unknown into a false reassurance.
+
+### The dead man switch's grace is sized against the canary interval, and a paused check is silently useless
+
+Corrected by the director on 2026-08-23, the day the check was created.
+
+**The grace was set to 1 hour against a daily canary and is now 25 hours.** A grace
+shorter than the interval alerts on any single delayed send rather than on a broken path.
+That is the false positive problem reproduced inside the alerting layer itself, and it is
+the worst place for it: the alert that cries wolf here is the one reporting that alerting
+has stopped working, so training an operator to dismiss it removes the last line of
+defence rather than a convenience.
+
+The rule that follows is that the grace is a function of the canary interval and moves
+with it. That is why the cadence change when the 72 hour run closes is written as two
+halves of one step in the runbook: a weekly canary against a 25 hour grace reports an
+absence every week that nothing is wrong.
+
+**A paused check is silently useless, and un-pausing is a step rather than a memory.** A
+paused check still accepts pings and still returns 200, so nothing on the host can tell
+the difference: `canary.sh` reports a successful ping either way. What it does not do is
+report an absence, which is its entire function. Pausing while nothing is pinging is
+correct, so the state is legitimate and temporary, and the danger is exactly that it looks
+identical to the working state from every vantage point except the switch's own dashboard.
+The runbook therefore carries un-pausing in the canary setup steps and again in the deploy
+sequence, and states that a 200 from a ping is not evidence that anyone is watching.
+
+This is the same shape as every other defect this project has recorded under liveness: a
+thing that exists and does not act. The check exists, accepts input, and asserts nothing
+about the future.
+
 ### A stall is the age of the newest tick row, never the liveness of the recorder
 
 Decided 2026-08-23, confirmed by the director.
