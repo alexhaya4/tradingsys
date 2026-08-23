@@ -1475,6 +1475,18 @@ party that can see it.
 Both are the same rule in two places. **A component may only report success it has
 observed**, and an alerting component reporting unobserved success is worse than one that
 reports nothing, because it converts an unknown into a false reassurance.
+
+**Addendum, 2026-08-24: the third instance, and the rule stated in the other direction.**
+`assert_recording.sh` says "cannot read the tick table, so whether anything is being
+recorded is unknown" when the query fails, and "no tick has been recorded for Ns" only
+when it got an answer. Those are different states. Collapsing them would report an
+observation nobody made, which is the same fault as reporting a delivery nobody made, and
+it is worse in this direction because "nothing is being recorded" reads as a measurement
+and would send an operator looking at the recorder rather than at the database. The
+director confirmed this is the behaviour to keep after it arrived in a real alert during
+the permission failure of 2026-08-24. **An alerting layer may report what it observed and
+what it could not observe, and those are two different messages.**
+
 ### The dead man switch's grace is sized against the canary interval, and a paused check is silently useless
 
 Corrected by the director on 2026-08-23, the day the check was created.
@@ -1674,7 +1686,6 @@ definition an unexpected value, and unexpected values as label values are unboun
 cardinality, which is how a metrics endpoint becomes the outage. The total is a metric and
 the symbols go to the log line.
 
-
 ### An instrument whose venue this process cannot define is deferred, and the deferral is derived
 
 Directed by the director on 2026-08-24, after the second deploy failure, which was the
@@ -1725,7 +1736,6 @@ for: a warning naming each deferred instrument, a `deferred_instruments` field i
 instrument set an audited event; this is that set changing for a different reason, which
 is not what the account can afford but what the process can define.
 
-
 ### Where a fixture exists for readability, at least one test runs the real configured artifact
 
 Directed by the director on 2026-08-24, and it is a larger statement than either bug it
@@ -1757,7 +1767,6 @@ has never been observed failing is the CI-that-never-ran defect wearing a differ
 **The survey of what else is only exercised against a simplified fixture is in
 `PROGRESS.md`**, because it is current state rather than a ruling, and it is a list to
 work from rather than a sweep to perform now.
-
 
 ### Enable and start are different, and a script's promise has to be true
 
