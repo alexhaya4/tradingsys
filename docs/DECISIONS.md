@@ -1499,6 +1499,40 @@ This is the same shape as every other defect this project has recorded under liv
 thing that exists and does not act. The check exists, accepts input, and asserts nothing
 about the future.
 
+### The monitored side cannot verify the monitoring side, and 200 is not evidence
+
+Generalised by the director on 2026-08-23, from the paused dead man switch.
+
+**The concrete case.** The external check was created and then paused, correctly, because
+nothing was pinging it yet. A paused check still accepts pings and still answers 200.
+`canary.sh` therefore gets exactly the same response from a check that is watching and one
+that is not, and every observation available on this host is identical in both cases. The
+only place the difference is visible is the switch's own dashboard.
+
+**The general property, which is what makes this worth an entry.** Acceptance is not
+observation. A watchdog reports by acting on an absence, and acting on an absence is a
+future behaviour, so nothing the watched system can send it will ever confirm that the
+behaviour is armed. **The monitored side cannot verify the monitoring side.** This is not
+a quirk of one vendor: it is true of every external watchdog, every webhook receiver, and
+every queue that returns an acknowledgement, because in each case the acknowledgement
+proves receipt and the thing being relied on is what happens later.
+
+It is the liveness defect class again, the same one recorded for `/health`, for the
+oneshot unit that asserted a stack had once started, and for the process that was alive
+while its deadline passed. Existence, acceptance and correct future action are three
+different properties, and the last is the one that matters. Here it appears in the layer
+that was supposed to be the backstop for all the others.
+
+**What follows practically.** Un-pausing is a numbered step in every path that starts the
+canary rather than something to remember, and the runbook states that a 200 from a ping is
+not evidence that anyone is watching. The state has to be confirmed where it is visible.
+
+**What follows generally, and binds later work.** Anything we add that reports success by
+being accepted has this shape and gets the same treatment: the acceptance is not the
+verification, and the check has to be made where the behaviour actually lives. That covers
+an alerting webhook, a metrics remote write endpoint, a backup target that returns 200 on
+upload, and the venue acknowledging an order, which is the one where it will cost the most.
+
 ### A stall is the age of the newest tick row, never the liveness of the recorder
 
 Decided 2026-08-23, confirmed by the director.
