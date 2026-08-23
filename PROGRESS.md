@@ -381,6 +381,27 @@ many missing links.
 7. The cTrader refresh token call, before any deployment that outlives the access token,
    which expires about thirty days from issue.
 
+### What is only ever exercised against a simplified fixture
+
+Surveyed 2026-08-24, when the shipped universe assembly test was added. **This is a list
+to work from, not a sweep to perform**, and it is ordered by what a first execution would
+cost. The rule it comes from is in `docs/DECISIONS.md`: where a fixture exists for
+readability, at least one test runs the real configured artifact.
+
+| What | What is exercised | What is not | Cost of the gap |
+|---|---|---|---|
+| `deploy/provision/docker-compose.prod.yml` | Nothing. `scripts/verify.sh` and CI bring up `docker-compose.yml` alone | The whole production overlay: the `db_data` bind to the block volume, `restart: on-failure:20`, log rotation, and the Postgres tuning of `shared_buffers`, `max_wal_size` and `maintenance_work_mem` | **Highest.** Every deploy is the first execution of that file, and two of the three host failures sat next to it |
+| The provisioning scripts | Syntax, structure, and for the alerting path real delivery over HTTP | None of `bootstrap.sh`, `assert_healthy.sh`, `healthcheck.sh` has ever been **run against a compose stack** by anything but an operator | High. The bootstrap timer defect was invisible for exactly this reason |
+| `Application.start` to `assemble_ingest` | Both ends. The assembly has its own integration test; the runtime has a lifecycle test | The edge between them. No test enables a crypto venue in the `test` environment, so `_start_ingest` returns early in every run and the call is checked by the type checker and nothing else | Medium, and it is the two-complete-components shape again |
+| Venue catalogue scale | Recorded real responses, so the shape is honest | Scale. Tests resolve 2 symbols out of a 2 entry catalogue; production resolves 2 out of 833 | Low today, listed because it is the same category |
+| The `[ingest]` configuration section | The real `config/base.toml`, by every integration test through `live_settings` | The unit suite reads an embedded copy of that section in `tests/config/test_loader.py`. Two definitions of one thing: adding `stats_interval_seconds` required editing both | Low and bounded, but it is a drift mechanism in miniature |
+| `HttpHourFetcher` | Nothing | It has no tests at all and is the component that performs every backfill fetch | Deferred with the forex leg, and it re-enters with it |
+
+**The configuration layer is the counter-example and is worth naming as one.**
+`tests/config/test_loader.py` loads the real `config/` directory and asserts what the
+shipped production configuration actually does, including that it arms nothing. That is
+the pattern the rest of this table is missing.
+
 ### Continuous operation is not the exit criterion
 
 **Two claims, kept apart deliberately, because this tracker has already conflated three

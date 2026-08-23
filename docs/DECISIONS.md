@@ -1726,6 +1726,39 @@ instrument set an audited event; this is that set changing for a different reaso
 is not what the account can afford but what the process can define.
 
 
+### Where a fixture exists for readability, at least one test runs the real configured artifact
+
+Directed by the director on 2026-08-24, and it is a larger statement than either bug it
+came from.
+
+**Both deploy failures lived in one gap: no test had ever assembled the universe that
+ships.** Every assembly test ran against a one instrument universe, written so that
+assertions could name a row instead of counting rows. That is a good fixture. It is also,
+by construction, not the thing that ships, and the two failures were invisible to it for
+two different reasons. The startup deadlock, because the fixture upserted a definition
+production has no way to create. The deferred backfill, because the fixture carries no
+instrument with a historical source, so the entire forex path never executed.
+
+**The rule.** A fixture is written to make a test readable, which means it is written to
+be simpler than production. Every simplification is a place where the test and the
+deployment differ, and the differences are invisible precisely because they were chosen
+for clarity. So where a simplified fixture exists, at least one test runs the real
+configured artifact end to end, even if its assertions are coarser.
+
+The coarser assertions are the point rather than a compromise. "It assembles, the deferral
+is audited, and a quote still lands" catches both of these failures, and neither needed a
+test that could name a row.
+
+**Verified by running it backwards.** The new test was run against the pre-fix assembly
+and reproduces the host failure exactly, `InstrumentNotFoundError` at the same call site,
+with the same catalogue and registry log lines the host printed. A regression test that
+has never been observed failing is the CI-that-never-ran defect wearing a different hat.
+
+**The survey of what else is only exercised against a simplified fixture is in
+`PROGRESS.md`**, because it is current state rather than a ruling, and it is a list to
+work from rather than a sweep to perform now.
+
+
 ---
 
 ## Rejected, with the reason, so they are not revisited

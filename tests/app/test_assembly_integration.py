@@ -39,6 +39,7 @@ from tradingsys.core.provenance import TickSource
 from tradingsys.core.schedule import TradingSchedule
 from tradingsys.observability.health import HealthRegistry
 from tradingsys.observability.metrics import Metrics
+from tradingsys.persistence.audit import AuditCategory
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -347,6 +348,175 @@ class TestTheCountersLeaveTheProcess:
             assert events >= 1
         finally:
             await ingest.process.stop()
+
+
+def shipped_venue_responses() -> Callable[[httpx.Request], httpx.Response]:
+    """Serve both configured crypto symbols, from both recorded definitions.
+
+    The catalogue is the concatenation of two real recorded responses rather than one
+    response with a rewritten symbol, because the assembly under test resolves two
+    symbols out of a catalogue and a one entry catalogue would not exercise that.
+
+    The ticker payload is the recorded BTCUSDT one with an ETHUSDT copy appended, its
+    symbol rewritten. That much is a construction and is stated as one: the ticker
+    supplies only the funding cycle anchor, no assertion below depends on its value, and
+    the alternative is a live venue call inside CI.
+    """
+    data = Path(__file__).resolve().parents[1] / "venues" / "bybit" / "data"
+    eth = json.loads((data / "instruments_linear_ETHUSDT.json").read_text())
+    btc = json.loads((data / "instruments_linear_BTCUSDT.json").read_text())
+    definitions = eth
+    definitions["result"]["list"] = [*eth["result"]["list"], *btc["result"]["list"]]
+
+    ticker = json.loads((data / "tickers_linear_BTCUSDT.json").read_text())
+    btc_row = ticker["result"]["list"][0]
+    eth_row = dict(btc_row)
+    eth_row["symbol"] = VENUE_SYMBOL
+    ticker["result"]["list"] = [btc_row, eth_row]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "instruments-info" in request.url.path:
+            return httpx.Response(200, json=definitions)
+        return httpx.Response(200, json=ticker)
+
+    return handler
+
+
+@pytest.fixture
+async def shipped(
+    *,
+    live_settings: Settings,
+    database: Database,
+    instruments: InstrumentRepository,
+    market_data: MarketDataRepository,
+    audit_log: AuditLog,
+    ingest_metrics: Metrics,
+) -> AsyncIterator[AssembledIngest]:
+    """The assembly against the universe that ships, with nothing narrowed.
+
+    The only thing changed from `config/base.toml` is enabling the crypto venue, which
+    is what `config/production.toml` does on the host. The universe itself is untouched.
+    """
+    socket = ScriptedSocket([snapshot()])
+
+    async def connect(_url: str) -> ScriptedSocket:
+        return socket
+
+    crypto = live_settings.venues.crypto["bybit"].model_copy(update={"enabled": True})
+    venues = live_settings.venues.model_copy(update={"crypto": {"bybit": crypto}})
+    settings = live_settings.model_copy(update={"venues": venues})
+    ingest = await assemble_ingest(
+        settings,
+        SystemClock(),
+        database=database,
+        instruments=instruments,
+        market_data=market_data,
+        audit_log=audit_log,
+        currencies=default_registry,
+        metrics=ingest_metrics,
+        connect=connect,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(shipped_venue_responses())),
+    )
+    try:
+        yield ingest
+    finally:
+        await ingest.process.stop()
+        await ingest.aclose()
+
+
+class TestTheShippedUniverse:
+    """The universe that ships, assembled. Nothing here uses a narrowed fixture.
+
+    **Both deploy failures lived in this gap.** Every other test in this file runs
+    against a one instrument universe written so that assertions can name a row instead
+    of counting rows, which is a good fixture and is by construction not the thing that
+    ships. The startup deadlock and the deferred forex backfill were both invisible to
+    it: the first because the fixture upserted a definition production cannot create,
+    the second because the fixture carries no instrument with a historical source, so
+    the entire forex path never executed.
+
+    The rule this test exists to enforce: where a fixture exists for readability, at
+    least one test runs the real configured artifact.
+    """
+
+    async def test_the_universe_under_test_is_the_shipped_one(
+        self, live_settings: Settings
+    ) -> None:
+        """Pins what this file is claiming to cover.
+
+        Without it, narrowing `config/base.toml` would quietly narrow the test that
+        exists to stop the configuration being narrowed.
+        """
+        refs = live_settings.universe.instruments
+        assert {ref.venue for ref in refs} == {"bybit", "ctrader"}
+        assert len(refs) == 6
+        assert len(live_settings.universe.with_history()) == 4
+
+    async def test_it_assembles(self, shipped: AssembledIngest) -> None:
+        """The regression. This raised InstrumentNotFoundError for EUR/USD on the host,
+        because the backfill jobs were built from configuration alone and the cTrader
+        registry has never been populated by anything."""
+        shipped.process.register_activities()
+
+        assert "crypto_quotes" in shipped.process.supervisor.states
+
+    @pytest.mark.usefixtures("shipped")
+    async def test_the_crypto_leg_still_resolves_both_instruments(
+        self, instruments: InstrumentRepository
+    ) -> None:
+        # The fixture is requested for its effect: assembly has run against the shipped
+        # universe by the time this body executes, and what is asserted is what it left
+        # in the database rather than anything about the object it returns.
+        for symbol in ("ETH/USDT", "BTC/USDT"):
+            stored = await instruments.get(InstrumentId(venue="bybit", symbol=symbol))
+            assert stored is not None, f"{symbol} was not seeded from the venue catalogue"
+
+    async def test_no_backfill_runs_for_a_venue_nothing_defines(
+        self, shipped: AssembledIngest
+    ) -> None:
+        """Four instruments carry a historical source and none of them can be built.
+
+        Dukascopy history is stored against the execution venue's instrument row, so a
+        job needs that venue's definition for the row id and the price precision. With
+        no cTrader source there is no definition, and building the job anyway is what
+        stopped the deploy.
+        """
+        shipped.process.register_activities()
+
+        assert "dukascopy_backfill" not in shipped.process.supervisor.states
+
+    @pytest.mark.usefixtures("shipped")
+    async def test_the_deferral_is_audited_rather_than_silent(self, audit_log: AuditLog) -> None:
+        """A configured instrument that is quietly absent is indistinguishable from one
+        being recorded, which is why this is an audited event and not a log line only."""
+        entries = await audit_log.read(category=AuditCategory.SYSTEM)
+        deferrals = [entry for entry in entries if entry.action == "instruments_deferred"]
+        assert len(deferrals) == 1
+
+        payload = deferrals[0].payload
+        assert payload["venues"] == ["ctrader"]
+        assert payload["populated_venues"] == ["bybit"]
+        assert sorted(payload["instruments"]) == [
+            "ctrader:AUD/USD",
+            "ctrader:EUR/USD",
+            "ctrader:GBP/USD",
+            "ctrader:USD/JPY",
+        ]
+
+    async def test_a_quote_still_reaches_the_database(
+        self,
+        shipped: AssembledIngest,
+        instruments: InstrumentRepository,
+        market_data: MarketDataRepository,
+    ) -> None:
+        """The deferral must not cost the leg that works."""
+        shipped.process.register_activities()
+        shipped.process.start()
+        await asyncio.sleep(0.2)
+        await shipped.process.stop()
+
+        row_id = await instruments.row_id(INSTRUMENT_ID)
+        assert len(await market_data.fetch_ticks(row_id, TickSource.BYBIT)) == 1
 
 
 class TestReadiness:
