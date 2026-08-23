@@ -210,22 +210,35 @@ done
 sudo systemctl daemon-reload
 sudo systemctl enable tradingsys.service
 
-# Timers are enabled; the .service units they drive are not, because a timer driven unit
-# that is also enabled would run once at boot outside its schedule. The alert template
-# is enabled by nothing: it is started by name from an OnFailure= line.
+# Enabled, not started. The difference cost six hours on 2026-08-24: this step used to
+# run `enable --now`, so a `--skip-start` run promising to converge the host without
+# starting the stack started the assertion timers anyway. They then asserted, every
+# minute, against a stack that was deliberately not running, and undid the deploy
+# sequence's first step two steps before the stack came back. An assertion firing at a
+# moment the operator has deliberately taken the system down is a false positive, and a
+# false positive in the alerting layer is the one that trains someone to ignore it.
+#
+# The .service units the timers drive are not enabled, because a timer driven unit that
+# is also enabled would run once at boot outside its schedule. The alert template is
+# enabled by nothing: it is started by name from an OnFailure= line.
 for path in "${REPO_ROOT}"/deploy/provision/*.timer; do
-    sudo systemctl enable --now "$(basename "$path")"
+    sudo systemctl enable "$(basename "$path")"
 done
-echo "enabled, so the stack returns after a reboot"
-echo "health assertion every minute:    systemctl status tradingsys-health.timer"
-echo "recording assertion every 5 min:  systemctl status tradingsys-recording.timer"
-echo "alerting canary daily:            systemctl list-timers tradingsys-canary.timer"
+echo "enabled, so the stack and its assertions return after a reboot"
 
 # ---------------------------------------------------------------------------
 step "applying database migrations and starting"
 # ---------------------------------------------------------------------------
 if [[ "$SKIP_START" -eq 1 ]]; then
-    echo "skipped by --skip-start. Start with: sudo systemctl start tradingsys"
+    echo "skipped by --skip-start. Nothing was started, including the timers."
+    echo
+    echo "The assertion timers are enabled and NOT running, so nothing is currently"
+    echo "checking this host. They arm on the next boot by themselves. To arm them now,"
+    echo "after the stack is up and verified:"
+    echo
+    echo "  sudo systemctl start tradingsys.service"
+    echo "  sudo systemctl start tradingsys-health.timer tradingsys-recording.timer \\"
+    echo "                      tradingsys-canary.timer"
     exit 0
 fi
 
@@ -241,6 +254,16 @@ docker compose -f docker-compose.yml -f deploy/provision/docker-compose.prod.yml
 echo
 echo "stack status:"
 docker compose -f docker-compose.yml -f deploy/provision/docker-compose.prod.yml ps
+# Last, and only on the path that started the stack. An assertion is only meaningful
+# once the thing it asserts about exists.
+for path in "${REPO_ROOT}"/deploy/provision/*.timer; do
+    sudo systemctl start "$(basename "$path")"
+done
+echo
+echo "health assertion every minute:    systemctl status tradingsys-health.timer"
+echo "recording assertion every 5 min:  systemctl status tradingsys-recording.timer"
+echo "alerting canary daily:            systemctl list-timers tradingsys-canary.timer"
+
 echo
 echo "Bootstrap complete. Verify with:"
 echo "  deploy/provision/healthcheck.sh"

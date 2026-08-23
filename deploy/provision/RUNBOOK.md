@@ -148,7 +148,13 @@ It adopts the mount the platform created, creates `postgres` and `captures` dire
 with the ownership the containers need, checks the secrets, prepares the alerting state
 directory at `/var/lib/tradingsys`, puts the service user in the `systemd-journal` group
 so the alert handler can read a failed unit's journal, installs and enables every systemd
-unit in `deploy/provision`, applies the migrations, and starts the stack.
+unit in `deploy/provision`, applies the migrations, starts the stack, and only then
+starts the assertion timers.
+
+**Enabling and starting are separated deliberately.** Enabling is what makes the timers
+return after a reboot. Starting them is what makes them assert now, and an assertion is
+only meaningful once the thing it asserts about exists, so `--skip-start` leaves them
+enabled and stopped and says so.
 
 **It installs the directory rather than a list of units.** A list here would be a second
 definition of what the deployment consists of, and the way that fails is that a unit is
@@ -430,6 +436,12 @@ $EDITOR .env
 
 # 4. Re-run bootstrap without starting. It installs every unit in deploy/provision,
 #    re-checks that .env holds no placeholder, and converges the host. Idempotent.
+#
+#    --skip-start now means what it says. Until 2026-08-24 this step enabled the
+#    assertion timers with --now, so it started them here, undoing step 1 two steps
+#    before the stack came back, and they then failed every minute against a stack
+#    that was deliberately down. The timers are enabled and left stopped; step 9
+#    starts them.
 deploy/provision/bootstrap.sh --skip-start
 
 # 5. Migrations before the restart, never after. The app refuses to start against an

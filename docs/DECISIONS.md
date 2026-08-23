@@ -1759,6 +1759,29 @@ has never been observed failing is the CI-that-never-ran defect wearing a differ
 work from rather than a sweep to perform now.
 
 
+### Enable and start are different, and a script's promise has to be true
+
+Found 2026-08-24, from six hours of alerts that were correct about a stack nobody had
+asked to be running.
+
+`bootstrap.sh` installed the units and ran `systemctl enable --now` on every timer. That
+step sits before the `--skip-start` early exit, so a run whose whole purpose is to
+converge the host **without** starting the stack started the assertion timers anyway. In
+the deploy sequence that lands two steps before the stack returns, undoing the sequence's
+first step, which exists precisely to stop the assertions firing during a deploy window.
+
+Enabling is what makes a timer return after a reboot. Starting is what makes it assert
+now. Conflating them meant an assertion fired at a moment the operator had deliberately
+taken the system down, and **an assertion that fires when the operator already knows is a
+false positive**, which is the failure mode the whole alerting design is built to avoid.
+It arrived in the provisioning layer, which is the third layer to produce an instance of
+this family in two days.
+
+The timers are now enabled at install and started only on the path that starts the stack.
+The `--skip-start` path says out loud that they are enabled and not running, and names the
+command to arm them, because a check that exists and is not running is the other half of
+the same defect.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited
