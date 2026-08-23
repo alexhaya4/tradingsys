@@ -8,7 +8,8 @@
 #
 # What it does, in order: adopts the mount the platform already created, creates the
 # data directories, checks that .env is present and has no placeholder values left in
-# it, installs the systemd unit, and starts the stack.
+# it, prepares the alerting state directory, installs every systemd unit in this
+# directory, and starts the stack.
 #
 # It does not format and it does not mount. Whatever already owns the mount keeps
 # owning it, and this script verifies and adopts, refusing to proceed when the volume is
@@ -144,8 +145,15 @@ if [[ ! -f "${REPO_ROOT}/.env" ]]; then
 fi
 chmod 600 "${REPO_ROOT}/.env"
 
+# Alerting values are required rather than optional. A recorder nobody is told about
+# is the configuration this project has already decided not to operate: the first
+# deployment crash looped for four hours behind a unit reporting success, and every
+# assertion added since reports through this path. Absent values fail here, loudly,
+# rather than producing a host that records and cannot say when it stops.
 MISSING=()
-for required in POSTGRES_PASSWORD TRADINGSYS_DATABASE__PASSWORD GRAFANA_PASSWORD; do
+for required in POSTGRES_PASSWORD TRADINGSYS_DATABASE__PASSWORD GRAFANA_PASSWORD \
+                TRADINGSYS_ALERT_TELEGRAM_TOKEN TRADINGSYS_ALERT_TELEGRAM_CHAT_ID \
+                TRADINGSYS_ALERT_DEADMAN_URL; do
     value="$(grep -E "^${required}=" "${REPO_ROOT}/.env" | head -1 | cut -d= -f2- || true)"
     if [[ -z "$value" || "$value" == "change-me" ]]; then
         MISSING+=("$required")
@@ -154,31 +162,64 @@ done
 if [[ ${#MISSING[@]} -gt 0 ]]; then
     echo "error: these values in .env are absent or still the placeholder:" >&2
     printf '  %s\n' "${MISSING[@]}" >&2
+    echo >&2
     echo "A stack started with a placeholder password is a stack with a known password." >&2
+    echo "A stack started with no alerting is one that fails without telling anyone, which" >&2
+    echo "is the failure every assertion on this host reports through. The bot token and" >&2
+    echo "chat id come from BotFather; the dead man URL is the ping URL of an external" >&2
+    echo "check that alerts when the daily canary stops arriving. See the runbook." >&2
     exit 1
 fi
 echo "required secrets present"
 
 # ---------------------------------------------------------------------------
+step "preparing the alerting state directory"
+# ---------------------------------------------------------------------------
+# Holds which conditions are currently firing and the canary sequence. Without it the
+# alerter cannot suppress a repeat or send a recovery, so a four hour outage delivers
+# 240 identical messages and the channel gets muted.
+sudo install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 0755 /var/lib/tradingsys
+echo "alert state: /var/lib/tradingsys"
+
+# The OnFailure handler reads the failed unit's journal to say why it failed, and
+# journalctl shows an empty log rather than an error to a user who may not read it. An
+# empty excerpt reads exactly like a unit that failed silently, so the group membership
+# is part of provisioning rather than something an operator discovers.
+if ! id -nG "${SERVICE_USER}" | tr ' ' '\n' | grep -qx systemd-journal; then
+    sudo usermod -aG systemd-journal "${SERVICE_USER}"
+    echo "added ${SERVICE_USER} to systemd-journal; units pick this up on their next start"
+else
+    echo "${SERVICE_USER} can read the journal"
+fi
+
+# ---------------------------------------------------------------------------
 step "installing the systemd unit"
 # ---------------------------------------------------------------------------
-for unit in tradingsys.service tradingsys-health.service; do
+# Every unit in this directory is installed, rather than a list being maintained here.
+# A list is a second definition of what the deployment consists of, and the way it fails
+# is that someone adds a unit, wires it, tests it locally, and it never reaches the host.
+for path in "${REPO_ROOT}"/deploy/provision/*.service "${REPO_ROOT}"/deploy/provision/*.timer; do
+    unit="$(basename "$path")"
     sed -e "s|__REPO_ROOT__|${REPO_ROOT}|g" \
         -e "s|__DATA_ROOT__|${DATA_ROOT}|g" \
         -e "s|__SERVICE_USER__|${SERVICE_USER}|g" \
-        "${REPO_ROOT}/deploy/provision/${unit}" \
+        "$path" \
         | sudo tee "/etc/systemd/system/${unit}" >/dev/null
+    echo "installed ${unit}"
 done
-sudo install -m 0644 "${REPO_ROOT}/deploy/provision/tradingsys-health.timer" \
-    /etc/systemd/system/tradingsys-health.timer
 sudo systemctl daemon-reload
 sudo systemctl enable tradingsys.service
-# The timer is what says anything about the hours after startup. tradingsys.service is a
-# oneshot and reports active (exited) whether or not the app is alive, which is how a
-# four hour crash loop went unreported on 2026-08-19.
-sudo systemctl enable --now tradingsys-health.timer
+
+# Timers are enabled; the .service units they drive are not, because a timer driven unit
+# that is also enabled would run once at boot outside its schedule. The alert template
+# is enabled by nothing: it is started by name from an OnFailure= line.
+for path in "${REPO_ROOT}"/deploy/provision/*.timer; do
+    sudo systemctl enable --now "$(basename "$path")"
+done
 echo "enabled, so the stack returns after a reboot"
-echo "health assertion runs every minute: systemctl status tradingsys-health.timer"
+echo "health assertion every minute:    systemctl status tradingsys-health.timer"
+echo "recording assertion every 5 min:  systemctl status tradingsys-recording.timer"
+echo "alerting canary daily:            systemctl list-timers tradingsys-canary.timer"
 
 # ---------------------------------------------------------------------------
 step "applying database migrations and starting"

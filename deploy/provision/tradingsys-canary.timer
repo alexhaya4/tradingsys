@@ -1,0 +1,28 @@
+# Runs the canary daily, at 06:00 UTC.
+#
+# 06:00 UTC is 09:00 in Nairobi, which is a waking hour. A canary that arrives while you
+# are asleep is one you read as a batch the next morning, and the point of a daily
+# canary is that you notice the day it stops.
+#
+# THE CADENCE CHANGES ONCE, AND THE CHANGE IS A RUNBOOK STEP RATHER THAN A MEMORY.
+# Daily until the 72 hour run completes, then weekly: a path broken on Monday and
+# discovered on Sunday would have covered the whole run. To switch, change OnCalendar
+# below to `Mon *-*-* 06:00:00`, re-run bootstrap.sh, and widen the dead man switch's
+# grace period to 8 days in the same sitting. Both halves or neither: a weekly canary
+# against a 25 hour grace period reports an absence every week that nothing is wrong.
+#
+# Persistent=true so a host that was down at 06:00 sends late rather than never. A late
+# canary lands inside the grace period; a skipped one would be reported as an absence
+# that has already been explained by the host being off.
+
+[Unit]
+Description=Send the tradingsys alerting canary daily
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+Persistent=true
+AccuracySec=1min
+Unit=tradingsys-canary.service
+
+[Install]
+WantedBy=timers.target

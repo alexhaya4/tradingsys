@@ -17,6 +17,11 @@ Wants=network-online.target
 # writing to the wrong disk is not.
 RequiresMountsFor=__DATA_ROOT__
 
+# A failed start is now delivered rather than only logged. This unit blocks on --wait,
+# so a failure here means the stack could not become healthy within the timeout, which
+# is the deploy going wrong on a host nobody is watching.
+OnFailure=tradingsys-alert@%n.service
+
 [Service]
 Type=oneshot
 RemainAfterExit=yes

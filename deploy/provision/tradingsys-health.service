@@ -13,11 +13,20 @@ Requires=docker.service
 After=tradingsys.service
 RequiresMountsFor=__DATA_ROOT__
 
+# What makes a failed assertion reach a person. Without this line the assertion still
+# fails, still shows in systemctl, and still writes to journald, and none of those is a
+# thing anyone is looking at when it matters.
+OnFailure=tradingsys-alert@%n.service
+
 [Service]
 Type=oneshot
 WorkingDirectory=__REPO_ROOT__
 User=__SERVICE_USER__
 Group=__SERVICE_USER__
 Environment=TRADINGSYS_DATA_ROOT=__DATA_ROOT__
+# The key this unit's alerts are filed under, so the assertion can clear its own alert
+# when it passes again. %n is systemd's own name for this unit, which keeps the name in
+# one place: the script has no idea what it is called and does not need one.
+Environment=TRADINGSYS_ALERT_KEY=%n
 EnvironmentFile=__REPO_ROOT__/.env
 ExecStart=__REPO_ROOT__/deploy/provision/assert_healthy.sh

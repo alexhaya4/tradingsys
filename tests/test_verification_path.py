@@ -243,7 +243,14 @@ def function_body(name: str) -> str:
     return body[start : body.index("\n}\n", start)]
 
 
-SHELL_FILES = (*sorted(REPO_ROOT.glob("scripts/*.sh")), WORKFLOW)
+# The provisioning scripts are held to the same rule as the verification path. They run
+# unattended on a host nobody is watching, so a check there that cannot say why it failed
+# costs more than one here, not less.
+SHELL_FILES = (
+    *sorted(REPO_ROOT.glob("scripts/*.sh")),
+    *sorted(REPO_ROOT.glob("deploy/provision/*.sh")),
+    WORKFLOW,
+)
 
 
 class TestChecksDoNotDiscardTheirEvidence:

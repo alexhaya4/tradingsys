@@ -1,0 +1,26 @@
+# Delivers an alert for a unit that failed. Started by OnFailure= on the units that
+# assert something, never directly.
+#
+# The instance name is the failed unit, passed as %n by the failing unit's OnFailure=
+# line, so this file holds no list of what it watches and cannot fall out of step with
+# one. Adding OnFailure=tradingsys-alert@%n.service to a new unit is the whole wiring.
+#
+# Installed by deploy/provision/bootstrap.sh, which substitutes the paths. Edit this
+# file and re-run bootstrap rather than editing the installed copy, or the host stops
+# being reproducible from the repository.
+
+[Unit]
+Description=Deliver an alert for %i
+
+[Service]
+Type=oneshot
+WorkingDirectory=__REPO_ROOT__
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+EnvironmentFile=__REPO_ROOT__/.env
+ExecStart=__REPO_ROOT__/deploy/provision/alert_unit_failed.sh %i
+
+# Delivery reaches the internet, and this host's networking has failed before. notify.sh
+# already retries; this bounds the whole attempt so a hung send cannot occupy the alert
+# path while a second condition is waiting to report.
+TimeoutStartSec=120

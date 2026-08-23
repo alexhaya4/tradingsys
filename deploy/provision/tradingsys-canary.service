@@ -1,0 +1,21 @@
+# Sends the canary that proves the alerting path works.
+#
+# It carries no OnFailure=. A canary that cannot be delivered cannot report its own
+# failure through the channel it just failed to reach, and trying would send a second
+# message down the same broken path. The failure is recorded in the journal and in this
+# unit's state, and the absence of the ping is what reaches you, from off this host.
+#
+# Installed by deploy/provision/bootstrap.sh, which substitutes the paths. Edit this
+# file and re-run bootstrap rather than editing the installed copy.
+
+[Unit]
+Description=tradingsys alerting canary
+
+[Service]
+Type=oneshot
+WorkingDirectory=__REPO_ROOT__
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+EnvironmentFile=__REPO_ROOT__/.env
+ExecStart=__REPO_ROOT__/deploy/provision/canary.sh
+TimeoutStartSec=180
