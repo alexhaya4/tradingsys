@@ -804,3 +804,142 @@ class TestTickCoverage:
                 end=stamps[0] + timedelta(hours=1),
                 max_quiet=timedelta(0),
             )
+
+
+class TestTheAggregatesSurviveTickRetention:
+    """The claim the whole retention recommendation rests on, pinned rather than read.
+
+    The recommendation to shorten tick retention rather than buy disk is only sound if the
+    one minute per-side bars survive the ticks being dropped, because that is what turns
+    "we lose history" into "we lose tick resolution and keep minute history". Until this
+    test existed that was a reading of TimescaleDB's documentation, which is exactly the
+    kind of claim about an external system this project has already been burned by
+    asserting in a comment.
+
+    Deleting rows is not the retention policy, which drops whole chunks, and the
+    difference matters enough to say: what is pinned here is that materialised aggregate
+    rows are independent of the rows they were computed from, which is the property the
+    recommendation needs. A policy that drops a chunk removes the same rows more
+    efficiently.
+    """
+
+    async def _bars(
+        self, database: Database, aggregate: str, row_id: int, bucket: datetime
+    ) -> list[tuple[datetime, Decimal]]:
+        """Bars for one instrument and one minute.
+
+        Scoped rather than counted across the aggregate, and the reason is itself evidence
+        for the property under test: the suite's truncation empties ``ticks`` and leaves
+        materialised aggregate rows from earlier tests behind, which is exactly the
+        independence being asserted. A global count would be measuring the other tests.
+        """
+        rows = await database.fetch(
+            f"SELECT bucket, close FROM {aggregate} "
+            "WHERE instrument_id = $1 AND bucket = $2 ORDER BY source",
+            row_id,
+            bucket,
+        )
+        return [(row["bucket"], row["close"]) for row in rows]
+
+    async def test_a_bar_outlives_the_ticks_it_was_computed_from(
+        self,
+        instruments: InstrumentRepository,
+        market_data: MarketDataRepository,
+        database: Database,
+    ) -> None:
+        row_id = await instruments.upsert(eurusd())
+        minute = datetime(2025, 3, 5, 10, 0, tzinfo=UTC)
+        await market_data.store_ticks(
+            row_id,
+            TickSource.CTRADER,
+            [
+                Quote(
+                    eurusd().id,
+                    minute + timedelta(seconds=s),
+                    Decimal("1.08500"),
+                    Decimal("1.08512"),
+                )
+                for s in (0, 10, 20)
+            ],
+        )
+        # The continuous aggregate materialises on a schedule in production. Refreshed
+        # explicitly here, because what is under test is what happens to materialised
+        # rows afterwards, not the scheduler.
+        await database.execute(
+            "CALL refresh_continuous_aggregate('ohlcv_1m_bid', $1::timestamptz, $2::timestamptz)",
+            minute - timedelta(minutes=5),
+            minute + timedelta(minutes=5),
+        )
+        before = await self._bars(database, "ohlcv_1m_bid", row_id, minute)
+        assert len(before) == 1, "the bar has to exist before its survival means anything"
+
+        await database.execute("DELETE FROM ticks WHERE instrument_id = $1", row_id)
+        assert await database.fetchval("SELECT count(*) FROM ticks") == 0
+
+        after = await self._bars(database, "ohlcv_1m_bid", row_id, minute)
+        assert after == before, (
+            "the one minute bars did not survive their ticks being removed, which "
+            "invalidates the retention recommendation: shortening tick retention would "
+            "then lose minute history rather than only tick resolution"
+        )
+
+    async def test_both_sides_survive(
+        self,
+        instruments: InstrumentRepository,
+        market_data: MarketDataRepository,
+        database: Database,
+    ) -> None:
+        # Bid and ask are separate aggregates, and the cost model reads the pair. One
+        # surviving without the other would be worse than neither.
+        row_id = await instruments.upsert(eurusd())
+        minute = datetime(2025, 3, 5, 11, 0, tzinfo=UTC)
+        await market_data.store_ticks(
+            row_id,
+            TickSource.CTRADER,
+            [Quote(eurusd().id, minute, Decimal("1.08500"), Decimal("1.08512"))],
+        )
+        for aggregate in ("ohlcv_1m_bid", "ohlcv_1m_ask"):
+            await database.execute(
+                f"CALL refresh_continuous_aggregate('{aggregate}', "
+                "$1::timestamptz, $2::timestamptz)",
+                minute - timedelta(minutes=5),
+                minute + timedelta(minutes=5),
+            )
+        await database.execute("DELETE FROM ticks WHERE instrument_id = $1", row_id)
+
+        assert len(await self._bars(database, "ohlcv_1m_bid", row_id, minute)) == 1
+        assert len(await self._bars(database, "ohlcv_1m_ask", row_id, minute)) == 1
+
+    async def test_the_aggregate_keeps_the_source_it_was_derived_from(
+        self,
+        instruments: InstrumentRepository,
+        market_data: MarketDataRepository,
+        database: Database,
+    ) -> None:
+        # Research and execution venue bars must never merge, which is the reason source
+        # is carried through the aggregate. If retention drops execution venue ticks and
+        # the surviving bars lost their provenance, the cost model could calibrate on
+        # Dukascopy without anything saying so.
+        row_id = await instruments.upsert(eurusd())
+        minute = datetime(2025, 3, 5, 12, 0, tzinfo=UTC)
+        await market_data.store_ticks(
+            row_id,
+            TickSource.CTRADER,
+            [Quote(eurusd().id, minute, Decimal("1.085"), Decimal("1.0851"))],
+        )
+        await market_data.store_ticks(
+            row_id,
+            TickSource.DUKASCOPY,
+            [Quote(eurusd().id, minute, Decimal("1.084"), Decimal("1.0841"))],
+        )
+        await database.execute(
+            "CALL refresh_continuous_aggregate('ohlcv_1m_bid', $1::timestamptz, $2::timestamptz)",
+            minute - timedelta(minutes=5),
+            minute + timedelta(minutes=5),
+        )
+        await database.execute("DELETE FROM ticks WHERE instrument_id = $1", row_id)
+
+        sources = await database.fetch(
+            "SELECT source, close FROM ohlcv_1m_bid WHERE bucket = $1 ORDER BY source", minute
+        )
+        assert [row["source"] for row in sources] == ["ctrader", "dukascopy"]

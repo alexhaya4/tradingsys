@@ -2014,6 +2014,26 @@ recent enough that the job is still running rather than having run once**.
 That last clause is the defect class this project keeps meeting, arriving in the storage
 layer: existence and correct continuing action are different properties.
 
+### The aggregates surviving tick retention is a test, not a reading
+
+Decided 2026-08-24, at the director's instruction, before the retention decision rests on
+it.
+
+The recommendation to shorten tick retention rather than buy disk is sound only because
+the one minute per-side bars survive the ticks being dropped: that is what makes the loss
+tick resolution rather than history. Until now that was a reading of TimescaleDB's
+documentation, which is a claim about an external system held in prose, and this project
+has already paid for one of those this week.
+
+`tests/persistence/test_integration.py` now pins three things against a real database: a
+bar outlives the ticks it was computed from, both sides survive rather than one, and the
+aggregate keeps the `source` it was derived from, so retention cannot silently leave the
+cost model calibrating on research data.
+
+The test deletes rows where the policy would drop chunks. The property being pinned is
+that materialised aggregate rows are independent of the rows they came from, and the
+difference is stated in the test rather than glossed.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited
