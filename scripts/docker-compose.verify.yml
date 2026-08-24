@@ -1,0 +1,23 @@
+# Layered on top of the production overlay by scripts/verify.sh, and by nothing else.
+#
+# It changes exactly one thing: the app does not enable the crypto venue.
+#
+# WHY: with the venue enabled the app assembles the ingest process at startup, which
+# fetches the instrument catalogue from api.bybit.com. That made the verification path
+# depend on a venue being reachable from wherever it runs, which this project has already
+# ruled against for integration tests, and it fails on a CI runner rather than on a
+# developer's machine: Bybit answers a hosted runner differently from a residential
+# connection, and our REST client treats a 403 as a ten minute block, so the app exits and
+# the whole step reports "the production overlay did not come up healthy" for a reason
+# that has nothing to do with the overlay.
+#
+# WHAT IS STILL UNDER TEST: everything the overlay actually changes. The db_data bind to
+# the data root, the restart policy, the log rotation, the Postgres tuning, and the
+# provisioning scripts that assert against the running stack. What is not under test here
+# is whether the venue is reachable, which is what scripts/check_venue_assumptions.py is
+# for and which only means anything when run from the host.
+
+services:
+  app:
+    environment:
+      TRADINGSYS_VENUES__CRYPTO__BYBIT__ENABLED: "false"

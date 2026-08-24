@@ -224,6 +224,29 @@ class TestTheProductionOverlayIsExercised:
         body = function_body("verify_production_stack")
         assert "mktemp -d" in body
 
+    def test_it_does_not_depend_on_a_venue_being_reachable(self) -> None:
+        # The app assembles ingest at startup and would fetch the Bybit catalogue, which
+        # makes the step fail on a hosted runner for a reason that has nothing to do with
+        # the overlay. Venue reachability is check_venue_assumptions.py's job, from the
+        # host, where the answer means something.
+        overlay = REPO_ROOT / "scripts" / "docker-compose.verify.yml"
+        assert overlay.is_file()
+        body = overlay.read_text()
+        assert "TRADINGSYS_VENUES__CRYPTO__BYBIT__ENABLED" in body
+        assert "check_venue_assumptions" in body, (
+            "the file has to say where venue reachability is actually checked, or the "
+            "next reader takes this for coverage of it"
+        )
+
+    def test_the_venue_override_is_used_by_nothing_but_the_verification_path(self) -> None:
+        # If bootstrap or a unit picked it up, the deployment would silently stop
+        # recording. It lives under scripts/ rather than deploy/provision/ for that
+        # reason.
+        for path in sorted((REPO_ROOT / "deploy" / "provision").glob("*")):
+            assert "docker-compose.verify.yml" not in path.read_text(), (
+                f"{path.name} references the verification only overlay"
+            )
+
     def test_it_uses_its_own_compose_project(self) -> None:
         # Through COMPOSE_PROJECT_NAME, which is compose's own mechanism, so the scripts
         # under test need no test-only parameter and what runs here is what runs on the

@@ -380,9 +380,13 @@ PROVISION_DIR="${REPO_ROOT}/deploy/provision"
 PROD_DATA_ROOT=""
 
 prod_compose() {
+    # The third file changes one thing, the venue the app would otherwise reach out to,
+    # and says why in its own header. Everything the production overlay actually
+    # configures is still what runs here.
     COMPOSE_PROJECT_NAME="$VERIFY_PROJECT" TRADINGSYS_DATA_ROOT="$PROD_DATA_ROOT" \
         docker compose -f "${REPO_ROOT}/docker-compose.yml" \
-        -f "${PROVISION_DIR}/docker-compose.prod.yml" "$@"
+        -f "${PROVISION_DIR}/docker-compose.prod.yml" \
+        -f "${REPO_ROOT}/scripts/docker-compose.verify.yml" "$@"
 }
 
 prod_assert() {

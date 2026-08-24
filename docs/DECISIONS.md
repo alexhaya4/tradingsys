@@ -1940,6 +1940,17 @@ here, because the person who needs it is reading a runbook during a deploy rathe
 decision log afterwards. Stating what a green pipeline does not cover is part of the work:
 the CI-that-never-ran defect began as a badge nobody had asked what it checked.
 
+**One thing the step deliberately does not run: the venue.** The app assembles the ingest
+process at startup, which fetches the Bybit catalogue, so the first CI run of this step
+failed with "the production overlay did not come up healthy" for a reason that had nothing
+to do with the overlay. It passed on a developer machine and failed on a hosted runner,
+which is the shape of dependency this project already refused for integration tests. A
+third compose file, used by the verification path and by nothing else, disables the venue
+for that run and says in its own header where venue reachability is actually checked,
+which is `scripts/check_venue_assumptions.py` from the host, where the answer means
+something. It lives under `scripts/` rather than `deploy/provision/` so that nothing on
+the host can pick it up and silently stop recording.
+
 **Two mechanisms made this cheap enough to be worth doing.** `COMPOSE_PROJECT_NAME` is
 compose's own way of isolating a stack, so the scripts under test need no test-only
 parameter and what runs in CI is what runs on the host. And sourcing `healthcheck.sh` now
