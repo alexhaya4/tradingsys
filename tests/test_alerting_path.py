@@ -638,9 +638,22 @@ class TestTheProvisioningScriptAsksRatherThanAsserts:
         assert "refuses rather than fixing it" in body
 
     def test_the_refusal_names_the_repair(self) -> None:
+        # The path is the one it was asked about, so an operator can paste the line
+        # rather than translating it.
         body = BOOTSTRAP.read_text()
-        assert "chown -R ${PG_UID}:${PG_GID} ${PGDATA_DIR}" in body
+        assert "chown -R ${PG_UID}:${PG_GID} ${pgdata}" in body
         assert "systemctl stop tradingsys.service" in body
+
+    def test_the_decision_can_be_exercised_without_a_host(self) -> None:
+        # Read only, no sudo, no mount, and ahead of the mount check so that a scratch
+        # directory is enough. Without this the branch that refuses could only ever be
+        # observed on the machine it was protecting.
+        body = BOOTSTRAP.read_text()
+        assert "--check-data-root" in body
+        assert 'if [[ -n "$CHECK_DATA_ROOT" ]]; then' in body
+        assert body.index('if [[ -n "$CHECK_DATA_ROOT" ]]; then') < body.index(
+            'step "adopting the volume the platform mounted"'
+        ), "the check mode must not require a mounted volume to reach"
 
 
 class TestTheDatabaseHealthcheckAssertsServing:
@@ -805,3 +818,126 @@ class TestTheStallQueryRunsAgainstARealDatabase:
         )
         rows = await database.fetch(self._sql())
         assert rows[0]["source"] == TickSource.CTRADER.value
+
+
+class TestTheStorageProjection:
+    """The arithmetic that reported 12,327 days from five minutes of data.
+
+    A new variety of the class this repository keeps meeting: not a check proving less
+    than it claims, but one asserting a number that cannot be true, confidently, beside
+    the word pass. Every step of it was individually correct against a denominator that
+    had not elapsed.
+
+    The same error was made independently by hand on the same day, dividing a partial
+    hour by 3600, which is evidence the shape is easy to fall into rather than a lapse in
+    one script. So the fix is structural: the denominator is the observed span, and the
+    span is printed beside the result.
+
+    These call the function directly, because no CI database will ever hold an hour of
+    ticks and the case that broke cannot otherwise be exercised at all.
+    """
+
+    HEALTHCHECK = PROVISION / "healthcheck.sh"
+    GIGABYTE = 1_000_000_000
+
+    def project(self, count: int, span_seconds: int, per_row: str = "21.90") -> str:
+        volume = 60 * self.GIGABYTE
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'source "{self.HEALTHCHECK}"; project_storage {count} {span_seconds} '
+                f'{per_row} {volume} {volume} 70 "steady state"',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
+
+    def test_sourcing_the_script_runs_no_checks(self) -> None:
+        # The guard that makes the rest of this class possible. Without it, sourcing runs
+        # the whole suite against whatever machine the test is on.
+        result = subprocess.run(
+            ["bash", "-c", f'source "{self.HEALTHCHECK}"; echo sourced'],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "sourced"
+        assert "tradingsys host verification" not in result.stdout
+
+    def test_the_rate_comes_from_the_observed_span(self) -> None:
+        # The director's own measurement: 53,818 rows between 22:03:05 and 22:19:36.
+        # The old arithmetic would have called this 53,818 rows per day, 0.6 per second.
+        assert "54.3 rows/s" in self.project(53_818, 991)
+
+    def test_a_four_minute_window_is_not_a_daily_total(self) -> None:
+        # The host's own numbers on the day this was found: 19,488 rows in about four
+        # minutes, which is 81 per second and not 19,488 per day.
+        assert "81.2 rows/s" in self.project(19_488, 240, per_row="243.81")
+
+    def test_the_span_is_reported_beside_the_result(self) -> None:
+        # So a reader can see what was divided by, which is the only thing that would
+        # have made the original number obviously wrong.
+        assert "over 16.5 minutes" in self.project(53_818, 991)
+
+    def test_the_runway_is_days_not_millennia(self) -> None:
+        # 54 rows/s compressed on a 60 GB volume is under two years. The reported figure
+        # was 12,327 days, which is 33 years, and nothing objected to it.
+        projected = self.project(53_818, 991)
+        days = int(re.search(r"(\d+) days to full", projected).group(1))  # type: ignore[union-attr]
+        assert 300 < days < 1200, projected
+
+    def test_halving_the_rate_doubles_the_runway(self) -> None:
+        # The property that makes it a rate at all.
+        fast = int(re.search(r"(\d+) days to full", self.project(60_000, 1000)).group(1))  # type: ignore[union-attr]
+        slow = int(re.search(r"(\d+) days to full", self.project(30_000, 1000)).group(1))  # type: ignore[union-attr]
+        assert slow == pytest.approx(fast * 2, rel=0.02)
+
+    def test_the_same_rate_over_a_longer_window_projects_the_same(self) -> None:
+        # A window twice as long with twice the rows is the same rate. The old arithmetic
+        # would have doubled the projected consumption.
+        assert (
+            self.project(60_000, 1000).split(",")[1:] == self.project(120_000, 2000).split(",")[1:]
+        )
+
+    def test_a_zero_span_refuses_rather_than_dividing(self) -> None:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'source "{self.HEALTHCHECK}"; project_storage 1 0 21.90 1000 1000 70 "phase"',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert "span is zero" in result.stdout
+
+    def test_the_minimum_window_is_an_hour_and_is_configurable(self) -> None:
+        body = self.HEALTHCHECK.read_text()
+        assert "TRADINGSYS_PROJECTION_MIN_SECONDS:-3600" in body
+
+    def test_headroom_refuses_a_percentage_that_is_not_a_number(self) -> None:
+        # df prints nothing for a path that does not exist, and bash reads "" as 0, so
+        # this check used to pass on a missing volume while printing " percent full".
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'source "{self.HEALTHCHECK}"; DATA_ROOT=/does/not/exist volume_headroom',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert "headroom is unknown" in result.stdout

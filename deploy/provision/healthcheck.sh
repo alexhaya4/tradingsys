@@ -59,7 +59,16 @@ volume_is_its_own_device() {
 
 volume_headroom() {
     local pct
-    pct="$(df --output=pcent "$DATA_ROOT" | tail -1 | tr -dc '0-9')"
+    pct="$(df --output=pcent "$DATA_ROOT" 2>/dev/null | tail -1 | tr -dc '0-9')"
+    # An empty percentage is what df returns for a path that does not exist, and bash
+    # reads "" as 0 in an arithmetic comparison, so this check used to pass on a missing
+    # volume while printing " percent full ( used,  free)". Same family as the projection
+    # that reported 12,327 days: not proving less than it claims, but stating a number
+    # that cannot be true and being believed.
+    if ! [[ "$pct" =~ ^[0-9]+$ ]]; then
+        echo "df reported no usage figure for ${DATA_ROOT}, so headroom is unknown. The path is most likely absent or not mounted"
+        return 1
+    fi
     local used avail
     used="$(df -h --output=used "$DATA_ROOT" | tail -1 | tr -d ' ')"
     avail="$(df -h --output=avail "$DATA_ROOT" | tail -1 | tr -d ' ')"
@@ -70,18 +79,63 @@ volume_headroom() {
     echo "${pct} percent full (${used} used, ${avail} free), alert at ${ALERT_PERCENT}, operating limit ${OPERATING_LIMIT_PERCENT}"
 }
 
+# The observed window has to be long enough to be a rate rather than a moment. One hour
+# is the minimum because anything shorter is a sample of one market condition, and this
+# number is used to decide whether to buy storage this week.
+PROJECTION_MIN_SECONDS="${TRADINGSYS_PROJECTION_MIN_SECONDS:-3600}"
+
+project_storage() {
+    # Pure arithmetic, separated from the query so it can be exercised with fabricated
+    # inputs. THE DEFECT THIS SHAPE EXISTS TO PREVENT: the previous version counted rows
+    # in the last 24 hours and used that count as a daily rate. On a database holding
+    # five minutes of data it reported a rate 288 times too small and a runway of 12,327
+    # days, and nothing objected, because every step of the arithmetic was individually
+    # correct against a denominator that had not elapsed.
+    #
+    # The same error was made independently by hand on the same day, dividing a partial
+    # hour by 3600, so the remedy is structural rather than a matter of care: the
+    # denominator is always the observed span, and the span is always reported beside the
+    # result so a reader can see what it was divided by.
+    local count="$1" span="$2" per_row="$3" avail="$4" total="$5" alert="$6" phase="$7"
+    awk -v count="$count" -v span="$span" -v per_row="$per_row" -v avail="$avail" \
+        -v total="$total" -v alert="$alert" -v phase="$phase" '
+    BEGIN {
+        if (span <= 0) { print "observed span is zero, nothing to project"; exit 1 }
+        per_second = count / span
+        per_day    = per_second * 86400 * per_row
+        if (per_day <= 0) { print "observed rate is zero, nothing to project"; exit 1 }
+        to_full  = avail / per_day
+        headroom = (total * alert / 100) - (total - avail)
+        to_alert = headroom / per_day
+        printf "%d rows over %.1f minutes, %.1f rows/s, %.2f B/row (%s), %.2f GB/day: %.0f days to full", \
+               count, span / 60, per_second, per_row, phase, per_day / 1e9, to_full
+        if (to_alert > 0) printf ", %.0f days to the %d percent alert", to_alert, alert
+        else printf ", already past the %d percent alert", alert
+        printf "\n"
+    }'
+}
+
 volume_projection() {
-    # A percentage says where the volume is. A projection says whether to act this week.
-    local rows age_days
-    rows="$($COMPOSE exec -T db psql -qtAX -U "${POSTGRES_USER:-tradingsys}" -d "${POSTGRES_DB:-tradingsys}" \
-        -c "SELECT count(*) FROM ticks WHERE ts >= now() - interval '24 hours'" 2>&1)" \
-        || { echo "could not query the tick table: $(tail -1 <<<"$rows")"; return 1; }
-    if ! [[ "$rows" =~ ^[0-9]+$ ]]; then
-        echo "the tick table did not answer with a count: $(head -c 200 <<<"$rows")"
+    # A percentage says where the volume is. A projection says whether to act this week,
+    # and only if it divides by time that actually elapsed.
+    local answer count span age_days
+    answer="$($COMPOSE exec -T db psql -qtAX -U "${POSTGRES_USER:-tradingsys}" -d "${POSTGRES_DB:-tradingsys}" \
+        -c "SELECT count(*), COALESCE(EXTRACT(epoch FROM max(ts) - min(ts))::bigint, 0) FROM ticks WHERE ts >= now() - interval '24 hours'" 2>&1)" \
+        || { echo "could not query the tick table: $(tail -1 <<<"$answer")"; return 1; }
+    IFS='|' read -r count span <<<"$answer"
+    if ! [[ "$count" =~ ^[0-9]+$ && "$span" =~ ^[0-9]+$ ]]; then
+        echo "the tick table did not answer with a count and a span: $(head -c 200 <<<"$answer")"
         return 1
     fi
-    if [[ "$rows" -eq 0 ]]; then
+    if [[ "$count" -eq 0 ]]; then
         echo "no ticks in the last 24 hours, so there is no observed rate to project from"
+        return 0
+    fi
+    if [[ "$span" -lt "$PROJECTION_MIN_SECONDS" ]]; then
+        # Reported rather than computed. A projection from a few minutes is not a
+        # conservative estimate, it is a number with no relationship to the answer, and
+        # printing one beside the word pass is how 12,327 days went unchallenged.
+        echo "insufficient observation window: ${count} rows spanning $((span / 60)) minutes, against a $((PROJECTION_MIN_SECONDS / 60)) minute minimum. No projection made"
         return 0
     fi
 
@@ -89,32 +143,21 @@ volume_projection() {
         -c "SELECT COALESCE(EXTRACT(epoch FROM now() - min(ts)) / 86400, 0)::int FROM ticks" 2>/dev/null)"
     [[ "$age_days" =~ ^[0-9]+$ ]] || age_days=0
 
-    local avail_bytes
+    local avail_bytes total_bytes per_row phase
     avail_bytes="$(df --output=avail --block-size=1 "$DATA_ROOT" | tail -1 | tr -dc '0-9')"
-    local total_bytes
     total_bytes="$(df --output=size --block-size=1 "$DATA_ROOT" | tail -1 | tr -dc '0-9')"
 
     # In steady state each day adds one compressed day while the seven day uncompressed
     # window stays a constant size. Before day seven nothing has been compressed yet, so
     # the growth rate is the uncompressed figure and saying otherwise would flatter it.
-    awk -v rows="$rows" -v avail="$avail_bytes" -v total="$total_bytes" \
-        -v comp="$BYTES_PER_ROW_COMPRESSED" -v uncomp="$BYTES_PER_ROW_UNCOMPRESSED" \
-        -v age="$age_days" -v after="$COMPRESS_AFTER_DAYS" -v alert="$ALERT_PERCENT" '
-    BEGIN {
-        steady = (age >= after)
-        per_row = steady ? comp : uncomp
-        per_day = rows * per_row
-        if (per_day <= 0) { print "observed rate is zero, nothing to project"; exit 0 }
-        to_full  = avail / per_day
-        headroom = (total * alert / 100) - (total - avail)
-        to_alert = headroom / per_day
-        phase = steady ? "steady state, compressed" : "first " after " days, not yet compressed"
-        printf "%d rows/24h at %.2f B/row (%s), %.2f GB/day: %.0f days to full", \
-               rows, per_row, phase, per_day / 1e9, to_full
-        if (to_alert > 0) printf ", %.0f days to the %d percent alert", to_alert, alert
-        else printf ", already past the %d percent alert", alert
-        printf "\n"
-    }'
+    if [[ "$age_days" -ge "$COMPRESS_AFTER_DAYS" ]]; then
+        per_row="$BYTES_PER_ROW_COMPRESSED"
+        phase="steady state, compressed"
+    else
+        per_row="$BYTES_PER_ROW_UNCOMPRESSED"
+        phase="first ${COMPRESS_AFTER_DAYS} days, not yet compressed"
+    fi
+    project_storage "$count" "$span" "$per_row" "$avail_bytes" "$total_bytes" "$ALERT_PERCENT" "$phase"
 }
 
 unit_enabled() {
@@ -181,23 +224,70 @@ clock_sane() {
     echo "uptime ${mono}s, boottime ${boot}s, $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 
-echo "tradingsys host verification"
-echo
-check "volume is its own device"    volume_is_its_own_device
-check "volume headroom"             volume_headroom
-check "volume projection"           volume_projection
-check "systemd unit"                unit_enabled
-check "containers running"          containers_up
-check "app liveness /health"        app_live
-check "app readiness /ready"        app_ready
-check "metrics exposed"             metrics_present
-check "migrations at head"          migrations_at_head
-check "venue reachable"             venue_reachable
-check "clock"                       clock_sane
+# name -> function, in the order they run. One list, so --only and the full run cannot
+# disagree about what a check is called or what it does.
+CHECKS=(
+    "volume is its own device:volume_is_its_own_device"
+    "volume headroom:volume_headroom"
+    "volume projection:volume_projection"
+    "systemd unit:unit_enabled"
+    "containers running:containers_up"
+    "app liveness /health:app_live"
+    "app readiness /ready:app_ready"
+    "metrics exposed:metrics_present"
+    "migrations at head:migrations_at_head"
+    "venue reachable:venue_reachable"
+    "clock:clock_sane"
+)
 
-echo
-if [[ "$FAILED" -gt 0 ]]; then
-    echo "${FAILED} check(s) failed."
-    exit 1
+main() {
+    local only=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            # Runs one check by name. The verification path uses it to exercise the
+            # checks that need no systemd and no mounted volume, which is how a check
+            # gets watched failing somewhere other than a production host.
+            --only) only="${2:?--only needs a check name}"; shift 2 ;;
+            --list) printf '%s\n' "${CHECKS[@]%%:*}"; return 0 ;;
+            -h|--help) echo "usage: healthcheck.sh [--only NAME] [--list]"; return 0 ;;
+            *) echo "unknown argument: $1" >&2; return 2 ;;
+        esac
+    done
+
+    echo "tradingsys host verification"
+    echo
+
+    local entry name function ran=0
+    for entry in "${CHECKS[@]}"; do
+        name="${entry%%:*}"
+        function="${entry##*:}"
+        if [[ -n "$only" && "$name" != "$only" ]]; then
+            continue
+        fi
+        check "$name" "$function"
+        ran=$((ran + 1))
+    done
+
+    if [[ -n "$only" && "$ran" -eq 0 ]]; then
+        echo "no check is named '${only}'. Names:" >&2
+        printf '  %s\n' "${CHECKS[@]%%:*}" >&2
+        return 2
+    fi
+
+    echo
+    if [[ "$FAILED" -gt 0 ]]; then
+        echo "${FAILED} check(s) failed."
+        return 1
+    fi
+    echo "all checks passed."
+}
+
+# Sourcing this file defines the checks without running them, so the arithmetic in
+# project_storage can be exercised with fabricated inputs rather than only against a
+# database that happens to hold the right amount of history. That is the only way the
+# case this file got wrong, a window shorter than the denominator, can be tested at all:
+# no CI database will ever hold an hour of ticks.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+    exit $?
 fi
-echo "all checks passed."
