@@ -1870,6 +1870,83 @@ Verified by breaking a real database and watching it flip: healthy, ownership ch
 underneath it, unhealthy about fifty five seconds later with the permission error in the
 health log, then healthy again after a restart repaired ownership.
 
+### A check that states a number which cannot be true, confidently
+
+Found by the director on 2026-08-24, in the healthcheck output on the live host.
+
+```
+pass  volume projection  20962 rows/24h at 243.81 B/row, 0.01 GB/day: 12327 days to full
+```
+
+About 19,500 rows had landed in roughly four minutes, so the real rate was near 80 per
+second and the projection was out by a factor of around 350. The cause was a 24 hour
+denominator against five minutes of data: the query counted rows in the last 24 hours and
+the arithmetic treated that count as a daily total.
+
+**This is a new variety of the class rather than another instance of it.** Everything
+recorded before was a check proving less than a reader would assume: `pg_isready`,
+`is-enabled`, a oneshot unit that had once started. This one proves nothing wrong about
+its own mechanics. Every step was individually correct. What it did was **state a number
+that cannot be true, confidently, beside the word pass**, and 12,327 days is absurd on its
+face. Nothing objected, including the two of us reading it.
+
+**The remedy is structural because the shape is easy to fall into.** The director made the
+same error by hand the same day, dividing a partial hour by 3600 and understating a rate
+fourfold. Two independent instances in one day is evidence about the shape rather than
+about either author. So: the denominator is always the observed span, `max(ts) - min(ts)`
+over the window; a span shorter than an hour reports insufficient data instead of
+projecting, because a projection from a few minutes is not a conservative estimate but a
+number with no relationship to the answer; and the span and the derived rate per second
+are printed beside the result, so what was divided by is visible to whoever reads it.
+
+An hour is the minimum because anything shorter samples one market condition, and this
+figure is used to decide whether to buy storage this week.
+
+**A second instance found while fixing the first.** `volume_headroom` read `df` output for
+a path that does not exist, got an empty percentage, and passed, because bash reads the
+empty string as zero in an arithmetic comparison. It printed " percent full ( used,
+ free)" and was counted as a pass. Same variety: not a weak assertion, a confident
+nonsense one.
+
+### CI covers the compose overlay and the assertion scripts, and not the host
+
+Decided 2026-08-24, closing for provisioning the gap the shipped universe test closed for
+the assembly.
+
+`deploy/provision/docker-compose.prod.yml` and the assertion scripts were executed by
+nothing but a deploy onto the live host, and three of that week's four failures were in
+that gap. The verification path now brings the overlay up on a scratch data root under its
+own compose project and runs the real scripts against it.
+
+**The failure paths are the reason, and they are what had never been watched anywhere.**
+`assert_healthy.sh` is required to fail with a service stopped and to name that service.
+`assert_recording.sh` is required to fail on an empty tick table saying nothing has ever
+been recorded, and to fail with the database down saying the state is **unknown**, which
+pins the distinction between what it observed and what it could not observe as behaviour
+rather than as prose. `bootstrap.sh --check-data-root` is required to accept a fresh
+directory and refuse a cluster owned by the wrong uid. The projection is required to
+report insufficient data on a database with no history, which is the state of every fresh
+runner and the state that produced 12,327 days.
+
+An assertion nobody has watched fail is a claim rather than a check, which is the same
+argument the canary rests on and the same one that made a regression test worth running
+backwards against the code it was written for.
+
+**The coverage statement is part of the decision.** A green run here means the overlay and
+those scripts work. It says nothing about systemd units, the block volume, `sudo`, the
+`systemd-journal` group or the droplet's disk, all of which are exercised nowhere but on
+the host by the operator. That sentence is in `deploy/provision/RUNBOOK.md` as well as
+here, because the person who needs it is reading a runbook during a deploy rather than a
+decision log afterwards. Stating what a green pipeline does not cover is part of the work:
+the CI-that-never-ran defect began as a badge nobody had asked what it checked.
+
+**Two mechanisms made this cheap enough to be worth doing.** `COMPOSE_PROJECT_NAME` is
+compose's own way of isolating a stack, so the scripts under test need no test-only
+parameter and what runs in CI is what runs on the host. And sourcing `healthcheck.sh` now
+defines its checks without running them, so the storage arithmetic can be exercised with
+fabricated inputs, which is the only way to test a window longer than any CI database will
+ever hold.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited

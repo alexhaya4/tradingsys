@@ -50,6 +50,7 @@ EXPECTED_STEPS = (
     "start full stack",
     "probe endpoints",
     "check prometheus targets",
+    "verify production stack",
 )
 
 
@@ -197,6 +198,77 @@ class TestTheFirstProvisionIsCovered:
 
     def test_ci_runs_the_fresh_path(self) -> None:
         assert "--fresh" in WORKFLOW.read_text()
+
+
+class TestTheProductionOverlayIsExercised:
+    """The gap the shipped-universe test closed for the assembly, closed here.
+
+    `docker-compose.prod.yml` and the provisioning scripts were run by nothing but a
+    deploy onto the live host until 2026-08-24, and three of that week's four failures
+    were in that gap. These assert that the verification path drives the real overlay and
+    the real scripts, including the halves that fail, because an assertion nobody has
+    watched fail is a claim rather than a check.
+    """
+
+    def test_the_step_runs_the_production_overlay(self) -> None:
+        body = SCRIPT.read_text()
+        assert "deploy/provision/docker-compose.prod.yml" in body, (
+            "the production overlay is what has never been executed; running the "
+            "development stack again would prove nothing new"
+        )
+
+    def test_it_runs_on_a_scratch_data_root(self) -> None:
+        # Never the real one. The overlay binds the database directory through
+        # TRADINGSYS_DATA_ROOT, and pointing this at a developer's volume would put a
+        # test in charge of recorded history.
+        body = function_body("verify_production_stack")
+        assert "mktemp -d" in body
+
+    def test_it_uses_its_own_compose_project(self) -> None:
+        # Through COMPOSE_PROJECT_NAME, which is compose's own mechanism, so the scripts
+        # under test need no test-only parameter and what runs here is what runs on the
+        # host.
+        body = SCRIPT.read_text()
+        assert "COMPOSE_PROJECT_NAME=" in body
+
+    def test_it_asserts_the_healthy_path_and_the_failing_one(self) -> None:
+        body = function_body("verify_production_stack")
+        assert "assert_healthy.sh" in body
+        assert "stop redis" in body, "the failure path is the half that had never run"
+        assert "passed with redis stopped" in body
+
+    def test_it_requires_the_failure_to_name_what_failed(self) -> None:
+        # A check that fails without saying which service is the probe defect this
+        # repository already paid for once.
+        body = function_body("verify_production_stack")
+        assert 'grep -q "redis"' in body
+
+    def test_it_distinguishes_an_unobserved_state_from_a_negative_one(self) -> None:
+        # assert_recording must say "unknown" when it cannot read the table and "nothing
+        # recorded" when it read an empty one. Collapsing them reports an observation
+        # nobody made.
+        body = function_body("verify_production_stack")
+        assert "nothing has ever been recorded" in body
+        assert 'grep -q "unknown"' in body
+
+    def test_it_exercises_both_branches_of_the_data_root_decision(self) -> None:
+        body = function_body("verify_production_stack")
+        assert "--check-data-root" in body
+        assert "accepted a cluster owned by the wrong uid" in body
+
+    def test_it_pins_the_projection_against_a_window_too_short_to_divide_by(self) -> None:
+        # The state a fresh runner is always in, and the one that produced a confident
+        # 12,327 days on the host.
+        body = function_body("verify_production_stack")
+        assert "insufficient observation window" in body
+
+    def test_it_says_what_it_does_not_cover(self) -> None:
+        # A green run here must not be read as covering the host. The same sentence is in
+        # the runbook, because that is where an operator reads it.
+        body = SCRIPT.read_text()
+        assert "does not cover the host" in body or "It does not cover the host" in body
+        for uncovered in ("systemd", "block volume", "sudo", "journal group"):
+            assert uncovered in body, f"the coverage statement omits {uncovered}"
 
 
 class TestTheReadmeDoesNotDrift:

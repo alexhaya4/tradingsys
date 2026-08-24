@@ -75,11 +75,23 @@ images do not, and sit on the droplet's own 80 GB disk.
 | 60/s | 10.0 months | 120 GB |
 | 80/s | 6.9 months | 158 GB |
 
-The rate is unmeasured until the weekday capture lands. 60 GB covers the capture, the 72
-hour run and phase 3 without a decision in the middle of any of them, which is what it was
-bought for. If the measured p95 rate lands above about 30 per second, the choice at that
-point is between growing the volume again and shortening retention, and both are to be
-priced then rather than defaulted into. Volumes grow online and never shrink.
+**A first honest rate, 2026-08-24: 54.3 quotes per second combined**, from 53,818 rows
+over the 16 minutes 31 seconds between 22:03:05 and 22:19:36 on a Sunday evening. It is a
+window and not a profile, and short windows are what produced the fourfold disagreement in
+the earlier samples, so it is a reason to finish the measurement rather than a number to
+size against. It sits near the 60 per second row above, which is roughly ten months on
+60 GB rather than the twenty the resize was sized for.
+
+The retention decision is therefore due, priced both ways: the volume size for 24 months
+at the measured p95, and the retention window that fits comfortably in 60 GB. It waits on
+a full weekday of hourly rates from the recorder itself, which is the first measurement
+this system has produced about itself rather than about a laptop.
+
+**The projection in `healthcheck.sh` divides by the observed span**, and reports
+insufficient data rather than projecting from a window shorter than an hour. Until
+2026-08-24 it counted rows in the last 24 hours and used that count as a daily rate, which
+on five minutes of data reported 12,327 days of runway beside the word pass. If it says
+insufficient observation window, that is the honest answer and not a fault.
 
 **Monthly cost: 30 USD.** 24 for the droplet, 6 for the 60 GB volume at 0.10 per GB.
 
@@ -178,8 +190,18 @@ entrypoint runs as root and chowns what it does not own at start.
 
 ## 5. Verify
 
+**What CI covers and what it does not.** `scripts/verify.sh` now brings up the production
+compose overlay on a scratch data root and runs the provisioning assertions against it,
+including their failure paths, so a green CI run means the overlay and those scripts work.
+**It says nothing about this host.** systemd units, the block volume, `sudo`, the
+`systemd-journal` group and the droplet's disk are exercised nowhere but here, by you, and
+a green pipeline is not evidence about any of them. That sentence is in the runbook rather
+than only in a report because the next person to read a green badge will read it here.
+
 ```bash
 deploy/provision/healthcheck.sh
+deploy/provision/healthcheck.sh --list                      # the check names
+deploy/provision/healthcheck.sh --only "volume projection"  # one of them
 ```
 
 Eleven checks: the volume is its own device and has headroom, the projection says how

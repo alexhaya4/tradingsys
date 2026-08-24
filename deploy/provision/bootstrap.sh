@@ -37,6 +37,7 @@ set -euo pipefail
 SERVICE_USER="${SERVICE_USER:-tradingsys}"
 DATA_ROOT="${TRADINGSYS_DATA_ROOT:-/mnt/tradingsys_db}"
 SKIP_START=0
+CHECK_DATA_ROOT=""
 
 usage() {
     cat <<'USAGE'
@@ -49,6 +50,12 @@ Options:
   --service-user NAME   Unix user that owns the repository and runs the stack.
                         Default: tradingsys
   --skip-start          Converge the host but do not start the stack.
+  --check-data-root PATH
+                        Report whether PATH could be used as the database data
+                        directory, and exit. Read only: it changes nothing, needs no
+                        sudo, and needs no mount, so the decision this script makes
+                        about an existing cluster can be exercised somewhere other
+                        than a production host.
   -h, --help            This message.
 USAGE
 }
@@ -58,6 +65,8 @@ while [[ $# -gt 0 ]]; do
         --data-root)    DATA_ROOT="${2:?--data-root needs a value}"; shift 2 ;;
         --service-user) SERVICE_USER="${2:?--service-user needs a value}"; shift 2 ;;
         --skip-start)   SKIP_START=1; shift ;;
+        --check-data-root)
+                        CHECK_DATA_ROOT="${2:?--check-data-root needs a path}"; shift 2 ;;
         -h|--help)      usage; exit 0 ;;
         *)              echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -66,6 +75,96 @@ done
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 step() { printf '\n== %s\n' "$1"; }
+
+resolve_postgres_ids() {
+    # THE UID IS ASKED FOR, NEVER ASSERTED. This used to say "the postgres image runs as
+    # uid 999" in a comment and chown to 999 in the line below it. The comment was wrong,
+    # the image runs as 70, and nothing could ever have caught the disagreement because
+    # the assumption and the code implementing it were the same idea written twice.
+    # Hardcoding 70 instead would break identically on the next image change, and the tag
+    # is already pinned in compose, so the image is the one place that knows.
+    # The placeholders satisfy interpolation for fields this does not read. compose
+    # refuses to render a file whose required variables are unset, and the database
+    # password has nothing to do with which image the db service runs. Rendering also
+    # validates both files, which is worth having here for free.
+    DB_IMAGE="$(TRADINGSYS_DATA_ROOT="${DATA_ROOT}" \
+        POSTGRES_PASSWORD=unused-for-introspection \
+        GRAFANA_PASSWORD=unused-for-introspection \
+        docker compose \
+        -f "${REPO_ROOT}/docker-compose.yml" \
+        -f "${REPO_ROOT}/deploy/provision/docker-compose.prod.yml" \
+        config --format json 2>/dev/null |
+        python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["db"]["image"])' 2>/dev/null)"
+    if [[ -z "$DB_IMAGE" ]]; then
+        echo "error: could not read the database image out of the compose files." >&2
+        echo "Without it the uid the data directory must be owned by is unknown, and" >&2
+        echo "guessing it is what broke this host on 2026-08-24." >&2
+        return 1
+    fi
+
+    PG_UID="$(docker run --rm --entrypoint id "$DB_IMAGE" -u postgres 2>/dev/null)"
+    PG_GID="$(docker run --rm --entrypoint id "$DB_IMAGE" -g postgres 2>/dev/null)"
+    if ! [[ "$PG_UID" =~ ^[0-9]+$ && "$PG_GID" =~ ^[0-9]+$ ]]; then
+        echo "error: ${DB_IMAGE} did not report a numeric uid and gid for its postgres user." >&2
+        echo "Got uid='${PG_UID}' gid='${PG_GID}'." >&2
+        echo "There is deliberately no fallback value here: a wrong number is exactly the" >&2
+        echo "defect this lookup replaces, and it fails silently at the next start." >&2
+        return 1
+    fi
+    echo "${DB_IMAGE} runs postgres as ${PG_UID}:${PG_GID}"
+}
+
+# Read only. Prints the verdict for one path and returns non-zero when it would refuse.
+# `runner` is how it inspects: sudo on a real host, nothing under --check-data-root, so
+# the decision can be exercised without privileges.
+data_root_verdict() {
+    local pgdata="$1" runner="${2:-}"
+    if $runner test -e "${pgdata}/PG_VERSION"; then
+        local owner
+        owner="$($runner stat -c '%u' "$pgdata" 2>/dev/null)"
+        if ! [[ "$owner" =~ ^[0-9]+$ ]]; then
+            echo "cannot read the ownership of ${pgdata}, so whether Postgres could open it is unknown" >&2
+            return 1
+        fi
+        if [[ "$owner" != "$PG_UID" ]]; then
+            echo "error: ${pgdata} holds a database cluster owned by uid ${owner}," >&2
+            echo "and ${DB_IMAGE} runs postgres as ${PG_UID}. Postgres cannot traverse a" >&2
+            echo "directory it does not own, so it would start, report healthy, and fail" >&2
+            echo "every connection with a permission error." >&2
+            echo >&2
+            echo "This script refuses rather than fixing it, because the safe repair depends" >&2
+            echo "on whether the database is running and only you know that. With the stack" >&2
+            echo "stopped:" >&2
+            echo >&2
+            echo "  sudo systemctl stop tradingsys.service" >&2
+            echo "  sudo chown -R ${PG_UID}:${PG_GID} ${pgdata}" >&2
+            echo "  deploy/provision/bootstrap.sh" >&2
+            echo >&2
+            echo "The image also repairs ownership itself at container start, because its" >&2
+            echo "entrypoint runs as root and chowns what it does not own, so restarting the" >&2
+            echo "db service is an alternative to the chown above." >&2
+            return 1
+        fi
+        echo "existing cluster owned by ${owner}, which is what ${DB_IMAGE} needs"
+        return 0
+    fi
+    if $runner test -d "$pgdata" && [[ -n "$($runner ls -A "$pgdata" 2>/dev/null)" ]]; then
+        echo "error: ${pgdata} is not empty and holds no PG_VERSION, so it is not a" >&2
+        echo "Postgres data directory this script recognises. Refusing to touch it." >&2
+        $runner ls -la "$pgdata" >&2
+        return 1
+    fi
+    echo "no cluster present, so it would be created and owned by ${PG_UID}:${PG_GID}"
+}
+
+# Read only, and deliberately ahead of the mount check: inspecting a path must not
+# require a mounted block volume, or the decision could still only be exercised on a
+# host that has one.
+if [[ -n "$CHECK_DATA_ROOT" ]]; then
+    resolve_postgres_ids || exit 1
+    data_root_verdict "${CHECK_DATA_ROOT%/}/postgres" || exit 1
+    exit 0
+fi
 
 # ---------------------------------------------------------------------------
 step "adopting the volume the platform mounted"
@@ -126,77 +225,26 @@ fi
 # ---------------------------------------------------------------------------
 step "creating the data directories"
 # ---------------------------------------------------------------------------
-# THE UID IS ASKED FOR, NEVER ASSERTED. This block used to say "the postgres image runs
-# as uid 999" in a comment and chown to 999 in the line below it. The comment was wrong,
-# the image runs as 70, and nothing could ever have caught the disagreement because the
-# assumption and the code implementing it were the same idea written twice. Hardcoding
-# 70 instead would break identically on the next image change, and the tag is already
-# pinned in compose, so the image is the one place that knows.
-DB_IMAGE="$(docker compose \
-    -f "${REPO_ROOT}/docker-compose.yml" \
-    -f "${REPO_ROOT}/deploy/provision/docker-compose.prod.yml" \
-    config --format json 2>/dev/null |
-    python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["db"]["image"])' 2>/dev/null)"
-if [[ -z "$DB_IMAGE" ]]; then
-    echo "error: could not read the database image out of the compose files." >&2
-    echo "Without it the uid the data directory must be owned by is unknown, and" >&2
-    echo "guessing it is what broke this host on 2026-08-24." >&2
-    exit 1
-fi
-
-PG_UID="$(docker run --rm --entrypoint id "$DB_IMAGE" -u postgres 2>/dev/null)"
-PG_GID="$(docker run --rm --entrypoint id "$DB_IMAGE" -g postgres 2>/dev/null)"
-if ! [[ "$PG_UID" =~ ^[0-9]+$ && "$PG_GID" =~ ^[0-9]+$ ]]; then
-    echo "error: ${DB_IMAGE} did not report a numeric uid and gid for its postgres user." >&2
-    echo "Got uid='${PG_UID}' gid='${PG_GID}'." >&2
-    echo "There is deliberately no fallback value here: a wrong number is exactly the" >&2
-    echo "defect this lookup replaces, and it fails silently at the next start." >&2
-    exit 1
-fi
-echo "${DB_IMAGE} runs postgres as ${PG_UID}:${PG_GID}"
+resolve_postgres_ids || exit 1
 
 sudo mkdir -p "${DATA_ROOT}/captures"
 sudo chown "${SERVICE_USER}:${SERVICE_USER}" "${DATA_ROOT}/captures"
 
+# AN EXISTING CLUSTER IS VERIFIED, NEVER CHOWNED. The previous version chowned on every
+# run, so a converge run landed on a live postmaster: its open files kept working while
+# every new backend failed to open global/pg_filenode.map, and the container healthcheck
+# could not see the difference. Changing ownership under a running database is not a
+# repair, it is the fault.
 PGDATA_DIR="${DATA_ROOT}/postgres"
-if [[ -e "${PGDATA_DIR}/PG_VERSION" ]]; then
-    # AN EXISTING CLUSTER IS VERIFIED, NEVER CHOWNED. The previous version chowned on
-    # every run, which meant a converge run landed on a live postmaster: its open files
-    # kept working while every new backend failed to open global/pg_filenode.map, and
-    # the container healthcheck could not see the difference. Changing ownership under a
-    # running database is not a repair, it is the fault.
-    OWNER_UID="$(sudo stat -c '%u' "$PGDATA_DIR")"
-    if [[ "$OWNER_UID" != "$PG_UID" ]]; then
-        echo "error: ${PGDATA_DIR} holds a database cluster owned by uid ${OWNER_UID}," >&2
-        echo "and ${DB_IMAGE} runs postgres as ${PG_UID}. Postgres cannot traverse a" >&2
-        echo "directory it does not own, so it would start, report healthy, and fail" >&2
-        echo "every connection with a permission error." >&2
-        echo >&2
-        echo "This script refuses rather than fixing it, because the safe repair depends" >&2
-        echo "on whether the database is running and only you know that. With the stack" >&2
-        echo "stopped:" >&2
-        echo >&2
-        echo "  sudo systemctl stop tradingsys.service" >&2
-        echo "  sudo chown -R ${PG_UID}:${PG_GID} ${PGDATA_DIR}" >&2
-        echo "  deploy/provision/bootstrap.sh" >&2
-        echo >&2
-        echo "The image also repairs ownership itself at container start, because its" >&2
-        echo "entrypoint runs as root and chowns what it does not own, so restarting the" >&2
-        echo "db service is an alternative to the chown above." >&2
-        exit 1
-    fi
-    echo "postgres data: ${PGDATA_DIR}, existing cluster owned by ${OWNER_UID}, unchanged"
-elif [[ -d "$PGDATA_DIR" ]] && [[ -n "$(sudo ls -A "$PGDATA_DIR")" ]]; then
-    echo "error: ${PGDATA_DIR} is not empty and holds no PG_VERSION, so it is not a" >&2
-    echo "Postgres data directory this script recognises. Refusing to touch it." >&2
-    sudo ls -la "$PGDATA_DIR" >&2
+if ! VERDICT="$(data_root_verdict "$PGDATA_DIR" sudo)"; then
     exit 1
-else
+fi
+echo "postgres data: ${PGDATA_DIR}, ${VERDICT}"
+if [[ ! -e "${PGDATA_DIR}/PG_VERSION" ]]; then
     # Fresh. Created with the ownership initdb needs rather than corrected afterwards.
     sudo mkdir -p "$PGDATA_DIR"
     sudo chown "${PG_UID}:${PG_GID}" "$PGDATA_DIR"
     sudo chmod 700 "$PGDATA_DIR"
-    echo "postgres data: ${PGDATA_DIR}, created empty and owned by ${PG_UID}:${PG_GID}"
 fi
 echo "capture output: ${DATA_ROOT}/captures"
 

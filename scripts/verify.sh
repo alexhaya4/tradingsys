@@ -16,6 +16,11 @@
 #                                  provisions a database from empty. Destructive.
 #   scripts/verify.sh --down       run everything, then tear the stack down
 #   scripts/verify.sh --dry-run    list the steps without executing them
+#
+# The last step brings up the production compose overlay on a scratch data root and runs
+# the provisioning assertions against it, including their failure paths. It covers the
+# overlay and those scripts. It does not cover the host: systemd, the block volume, sudo,
+# the journal group and the droplet's disk stay operator-verified.
 #   scripts/verify.sh --help       this message
 
 # -E propagates the ERR trap into functions. Without it the trap is silently skipped
@@ -39,6 +44,8 @@ REQUIRED_VARS=(POSTGRES_PASSWORD TRADINGSYS_DATABASE__PASSWORD GRAFANA_PASSWORD)
 DB_READY_TIMEOUT_SECONDS=60
 APP_READY_TIMEOUT_SECONDS=90
 PROMETHEUS_TIMEOUT_SECONDS=90
+# The overlay builds the app image and waits on every healthcheck, on a CI runner.
+PROD_WAIT_SECONDS=300
 HTTP_TIMEOUT_SECONDS=10
 
 usage() {
@@ -351,6 +358,148 @@ tear_down() {
 # entry point
 # ---------------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# The production overlay and the provisioning assertions.
+#
+# WHY THIS EXISTS: deploy/provision/docker-compose.prod.yml and the assertion scripts
+# were, until 2026-08-24, executed by nothing but a deploy onto the live host. Three of
+# that week's four failures were in that gap, and the pattern that closed the equivalent
+# gap for the assembly was to run the real artifact with coarse assertions rather than to
+# write more tests about its text.
+#
+# The failure paths are the point. Nothing in this system had ever watched an assertion
+# fail anywhere except in production, and an assertion nobody has seen fail is a claim
+# rather than a check.
+#
+# WHAT THIS CANNOT COVER, and the runbook says the same: systemd units, the real block
+# volume, sudo, the journal group, and the droplet's disk. A green run here means the
+# compose overlay and the assertion scripts work. It says nothing about the host.
+# ---------------------------------------------------------------------------
+VERIFY_PROJECT="tradingsys-verify"
+PROVISION_DIR="${REPO_ROOT}/deploy/provision"
+PROD_DATA_ROOT=""
+
+prod_compose() {
+    COMPOSE_PROJECT_NAME="$VERIFY_PROJECT" TRADINGSYS_DATA_ROOT="$PROD_DATA_ROOT" \
+        docker compose -f "${REPO_ROOT}/docker-compose.yml" \
+        -f "${PROVISION_DIR}/docker-compose.prod.yml" "$@"
+}
+
+prod_assert() {
+    # Runs one provisioning script against the overlay stack. The project name and data
+    # root travel in the environment, which is how compose itself is configured, so the
+    # scripts need no test-only parameter and what runs here is what runs on the host.
+    COMPOSE_PROJECT_NAME="$VERIFY_PROJECT" TRADINGSYS_DATA_ROOT="$PROD_DATA_ROOT" \
+        TRADINGSYS_ALERT_STATE_DIR="${PROD_DATA_ROOT}/alert-state" \
+        "$@"
+}
+
+cleanup_production_stack() {
+    # Registered on EXIT, so a failure anywhere in the step still tears the overlay down.
+    # Without this a failed run leaves a second stack holding the published ports, and
+    # the next run's migrations connect to the wrong database and fail for a reason that
+    # has nothing to do with what changed. Observed doing exactly that on 2026-08-24.
+    [[ -n "$PROD_DATA_ROOT" ]] || return 0
+    # Postgres wrote those files as its own uid, so they are not this user's to delete.
+    # The database image is already local and can remove them from inside the bind, which
+    # is the same reasoning as asking the image for the uid: the container owns what the
+    # container wrote.
+    prod_compose run --rm --no-deps --entrypoint sh db \
+        -c 'rm -rf /var/lib/postgresql/data/* /var/lib/postgresql/data/.[!.]*' >/dev/null 2>&1 || true
+    prod_compose down -v --remove-orphans >/dev/null 2>&1 || true
+    if ! rm -rf "$PROD_DATA_ROOT" 2>/dev/null; then
+        log "note: ${PROD_DATA_ROOT} could not be removed and holds files owned by the database image"
+    fi
+    PROD_DATA_ROOT=""
+}
+trap cleanup_production_stack EXIT
+
+verify_production_stack() {
+    PROD_DATA_ROOT="$(mktemp -d)"
+    mkdir -p "${PROD_DATA_ROOT}/postgres" "${PROD_DATA_ROOT}/alert-state"
+
+    # The development stack holds the published ports, and this one publishes the same
+    # ones because it is the real overlay rather than a copy with the awkward parts
+    # removed. It is brought back at the end unless the caller asked for a tear down.
+    log "stopping the development stack so the production overlay can take its ports"
+    docker compose -f "${REPO_ROOT}/docker-compose.yml" down --remove-orphans >/dev/null 2>&1 || true
+
+    log "the data root ownership decision, both branches"
+    "${PROVISION_DIR}/bootstrap.sh" --check-data-root "$PROD_DATA_ROOT" ||
+        fail "bootstrap refused a data root it should have accepted"
+    local occupied="${PROD_DATA_ROOT}/occupied"
+    mkdir -p "${occupied}/postgres"
+    printf '16\n' >"${occupied}/postgres/PG_VERSION"
+    if "${PROVISION_DIR}/bootstrap.sh" --check-data-root "$occupied" >/dev/null 2>&1; then
+        fail "bootstrap accepted a cluster owned by the wrong uid, which is the state that broke the host on 2026-08-24"
+    fi
+    log "refused a cluster owned by $(id -u) as it should"
+
+    log "starting the production overlay on a scratch data root"
+    # Datastores, then migrations, then the rest. The app refuses to start against an
+    # unmigrated database and says so, which is correct, and it means a single up --wait
+    # over the whole stack would time out on an empty data root rather than reporting
+    # the ordering. The host's deploy sequence has the same order for the same reason.
+    prod_compose up -d --build --wait --wait-timeout "$PROD_WAIT_SECONDS" db redis ||
+        fail "the production overlay datastores did not come up healthy"
+    prod_compose run --rm app alembic upgrade head >/dev/null ||
+        fail "migrations failed against the production overlay"
+    prod_compose up -d --wait --wait-timeout "$PROD_WAIT_SECONDS" ||
+        fail "the production overlay did not come up healthy"
+
+    log "assert_healthy.sh, with everything running"
+    prod_assert "${PROVISION_DIR}/assert_healthy.sh" ||
+        fail "assert_healthy.sh failed against a healthy stack"
+
+    # The half nothing had ever watched. A check that has only ever been seen passing is
+    # a claim about its own success path.
+    log "assert_healthy.sh, with a service stopped"
+    prod_compose stop redis >/dev/null 2>&1
+    local output status=0
+    output="$(prod_assert "${PROVISION_DIR}/assert_healthy.sh" 2>&1)" || status=$?
+    prod_compose start redis >/dev/null 2>&1
+    ((status != 0)) || fail "assert_healthy.sh passed with redis stopped, so it asserts nothing"
+    grep -q "redis" <<<"$output" ||
+        fail "assert_healthy.sh failed without naming redis: ${output}"
+    log "failed and named the service, as it must"
+
+    log "assert_recording.sh, against a database that has recorded nothing"
+    status=0
+    output="$(prod_assert "${PROVISION_DIR}/assert_recording.sh" 2>&1)" || status=$?
+    ((status != 0)) || fail "assert_recording.sh passed on an empty tick table"
+    grep -q "nothing has ever been recorded" <<<"$output" ||
+        fail "assert_recording.sh did not report an empty table as one: ${output}"
+
+    # The distinction the alerting layer is required to keep: what it observed, and what
+    # it could not observe, are two different messages.
+    log "assert_recording.sh, with the database unreachable"
+    prod_compose stop db >/dev/null 2>&1
+    status=0
+    output="$(prod_assert "${PROVISION_DIR}/assert_recording.sh" 2>&1)" || status=$?
+    prod_compose start db >/dev/null 2>&1
+    ((status != 0)) || fail "assert_recording.sh passed with the database down"
+    grep -q "unknown" <<<"$output" ||
+        fail "assert_recording.sh reported a missing observation as a negative one: ${output}"
+
+    log "the storage projection, on a window too short to divide by"
+    prod_compose up -d --wait --wait-timeout "$PROD_WAIT_SECONDS" >/dev/null 2>&1 ||
+        fail "the stack did not return after the database was stopped"
+    output="$(prod_assert "${PROVISION_DIR}/healthcheck.sh" --only "volume projection" 2>&1)" ||
+        fail "the projection check failed: ${output}"
+    grep -qE "insufficient observation window|no ticks in the last 24 hours" <<<"$output" ||
+        fail "the projection made a claim from a database with no history: ${output}"
+    log "reported insufficient data rather than projecting"
+
+    cleanup_production_stack
+
+    if [[ "$TEAR_DOWN" == false ]]; then
+        log "restoring the development stack"
+        docker compose -f "${REPO_ROOT}/docker-compose.yml" up -d --wait \
+            --wait-timeout "$PROD_WAIT_SECONDS" >/dev/null ||
+            fail "the development stack did not come back up"
+    fi
+}
+
 main() {
     while (($#)); do
         case "$1" in
@@ -389,6 +538,7 @@ main() {
     step "start full stack" start_full_stack
     step "probe endpoints" probe_endpoints
     step "check prometheus targets" check_prometheus
+    step "verify production stack" verify_production_stack
 
     if [[ "$TEAR_DOWN" == true ]]; then
         step "tear down stack" tear_down
