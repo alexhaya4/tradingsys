@@ -764,6 +764,45 @@ materialised objects and survive, which is pinned by test rather than read from
 documentation. What needs ticks specifically is cost model calibration, and old ticks are
 the least representative input to it.
 
+### What `SPEC.md` asserts and no code provides
+
+Audited 2026-08-24 at the director's instruction, after the retention policy was found to
+be a specification claim with no implementation. **This is a list to work from, not a
+sweep**, and it will shrink. Every row was checked against the tree rather than recalled.
+
+**Asserted, absent, and not waiting on a later phase.** These read as descriptions of the
+system today and are not true today.
+
+| `SPEC.md` says | Reality | Why it matters now |
+|---|---|---|
+| 4.0: ticks "retained for 24 months" | No `add_retention_policy` in any migration. Nothing drops anything, ever | The figure was used in sizing, in the runbook table and in a buy-disk decision. Nothing is at risk today because nothing deletes, which is why the decision can wait |
+| 10: "Database backed up on a schedule, with restore tested. An untested backup is not a backup" | **No backup of any kind exists.** Nothing in `deploy/provision` or `scripts` performs one | The most serious row here. The host is accumulating crypto tick history that Bybit does not publish and cannot be re-acquired, on one volume, with no copy |
+| 9: audit log "append-only at the database permission level, not merely by convention" | A trigger plus `REVOKE ... FROM PUBLIC`. The application role owns the table, so the revoke does not bind it and it can drop the trigger, which the test fixtures do | The guarantee is by convention, which is the thing the sentence explicitly denies |
+| 9: "The application role has no schema modification rights" | One role owns everything and can drop any table | Same root as above: no role separation exists |
+| 9: "Secret scanning runs in CI" | CI runs `scripts/verify.sh` and nothing else | The history was scanned once by hand before the first push, which is a different claim |
+| 9: "Dependency vulnerability scanning runs in CI and blocks on high severity findings" | Not present | |
+| 10: runbook lives at docs/RUNBOOK.md, written here without backticks because it does not exist and the tracker gate rightly objects to a path that names nothing | It lives at `deploy/provision/RUNBOOK.md`, and `docs/` holds only `DECISIONS.md` | A path claim that is simply false, and the cheapest row to close |
+| 10: "Versioned releases" | No tags, no version scheme. `pyproject.toml` says 0.1.0 and nothing reads it | Rollback is documented against commit shas, which works and is not what this says |
+| 4.0: higher timeframes "derived on read through continuous aggregates" | Only the one minute pair exists. Nothing derives 5m or 1h | Phase 3 needs it, so this is early rather than wrong |
+| 10: Grafana dashboards cover "system health, data freshness, position state, and performance" | One dashboard, service health | Data freshness now has an assertion and an alert, which is not a dashboard |
+
+**Asserted in the present tense, belonging to a later phase.** Listed so the audit is
+complete and so nobody reads them as defects.
+
+| `SPEC.md` says | Phase that provides it |
+|---|---|
+| 3.1: five supervised processes communicating over Redis streams with explicit contracts. Today one process runs ingest in-process and Redis carries nothing | 5 and 6 |
+| 4: `macro_event`, `news_item`, `signal`, `risk_decision`, `order`, `fill`, `position` tables. None exist | 4b, 5, 6 |
+| 6: every risk limit, the kill switch, reconciliation | 5 |
+| 7: idempotency, order state machine, partial fills, rate limiting, reconnection | 6 |
+| 2: "a backtest run is reproducible from its configuration and a data snapshot" | 3 |
+| 3.3: credential expiry and renewal on the venue interface. The interface exists; the cTrader refresh call is not written | Before any deployment outliving the access token |
+
+**The distinction worth keeping.** The second table is a plan written in the present
+tense, which is a stylistic choice. The first is a set of claims a reader would act on,
+and two of them, backups and the audit log guarantee, were being relied on without ever
+having been true.
+
 ### Measurements worth not repeating
 
 **Funding drag on a 200 USD account.** Measured 2026-08-16 from Bybit's own funding

@@ -2034,6 +2034,81 @@ The test deletes rows where the policy would drop chunks. The property being pin
 that materialised aggregate rows are independent of the rows they came from, and the
 difference is stated in the test rather than glossed.
 
+### Unchanged snapshot repeats are stored as rows, and the question is closed
+
+Measured by the director on 2026-08-24 and settled with the measurement, so that nobody
+reopens it on the strength of the estimate it replaces.
+
+| Instrument | Rows in 24 hours | Unchanged repeats | Share |
+|---|---|---|---|
+| 1 | 1,668,007 | 1 | 0.0 percent |
+| 2 | 1,689,297 | 0 | 0.0 percent |
+
+One repeated row in 3.36 million. The earlier estimate of up to 28,800 uninformative rows
+per instrument per day was the three second heartbeat rate, and it was a fair reading of a
+quiet Sunday. At 40 quotes per second the book does not sit still long enough to repeat,
+so the heartbeat never fires.
+
+**The reasoning stands independently of the measurement and is kept for that reason.**
+Even at a high share, deduplication would be the wrong lever:
+
+*A repeat is a positive observation.* It is the evidence that the book was still at that
+price at that instant, which is what distinguishes a quiet market from a dead feed. The
+gap detector, the staleness guard and any time-weighted spread calculation all depend on
+that distinction, and `gap_max_quiet_seconds` exists precisely because a repeat carries
+information. Trading a distinction three components rely on for a few percent of
+compressed bytes is a bad exchange, and this is the argument the director identified as
+the one that settles it.
+
+*Deduplication and compression compete for the same bytes.* Consecutive identical values
+are what columnar compression removes best, so a repeated row does not cost a full row.
+Dropping a fifth of the rows would not save a fifth of the compressed storage.
+
+*The lever is in the wrong place.* Retention and compression move storage by factors and
+by months of history. Deduplication moves it by a few percent.
+
+**Two incidental findings from the same query, worth more than the answer.** BTC and ETH
+produced 1.67M and 1.69M rows, within two percent of each other, so orderbook.1 update
+rate tracks neither turnover nor price: it is a property of the feed's cadence. That
+supersedes the reasoning from the Sunday samples, which argued from turnover and tick size
+to expect a difference. And 3.36M rows in 24 hours is 38.9 per second combined against the
+hourly profile's mean of 40.6, so the profile is stable rather than a one day artifact.
+### A specification claim with no implementation, which is the unreached class in a third place
+
+Directed by the director on 2026-08-24, on finding that `SPEC.md` section 4.0 states ticks
+are retained for 24 months and no code implements retention at all. There is no
+`add_retention_policy` in any migration and no job that drops anything.
+
+**The class, now in three forms.** First it was components nothing constructed:
+`app/ingest.py`, `venues/ctrader/source.py`, the Bybit instrument mapping. Then values
+nothing consumed: `StreamStats` and `RecorderStats`, incremented for a week and read by
+nobody. Now a specification claim nothing provides. In each case both ends are real and
+the edge between them does not exist, and in each case the missing edge is invisible
+precisely because the endpoints are individually correct.
+
+**Why this form is the worst of the three.** A component nothing constructs is dead code,
+and dead code is inert. A counter nothing reads loses evidence. But `SPEC.md` is
+authoritative by its own first line, and it is what a new session is told to read to be
+brought to full context. **A specification that asserts a behaviour the system does not
+have is not a gap, it is a false statement in the document the project treats as true**,
+and every reader downstream of it inherits the error. The retention figure had already
+been used in sizing arithmetic, in a runbook table, and in a decision about buying disk,
+none of which noticed that nothing implements it.
+
+**What follows immediately.** The retention decision loses its urgency, which is the right
+position to decide from: nothing is dropping data today, so the choice between shortening
+retention and buying disk can wait for the measured compression ratio rather than being
+made against an assumed one. And when it is taken, taking it means writing a migration,
+not changing a number.
+
+**The audit that follows.** `SPEC.md` was read for other statements of behaviour that no
+code provides, and the list is in `PROGRESS.md` rather than here, because it is current
+state and it will shrink. Two of its entries are worth naming here because they are not
+phase gated and were assumed to hold: there are **no database backups of any kind**, while
+section 10 states the database is backed up on a schedule with restore tested, and the
+audit log's append-only guarantee is **a trigger the application role can drop**, since
+that role owns the table, while section 9 states it is enforced at the permission level.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited
