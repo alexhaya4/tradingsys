@@ -30,10 +30,19 @@ check() {
     fi
 }
 
-# Measured 2026-08-18 against real venue output loaded into the real schema. Provenance
-# is in PROGRESS.md; these are the constants the retention arithmetic uses and they are
-# named here so a projection cannot silently disagree with the plan.
-BYTES_PER_ROW_COMPRESSED=21.90
+# Produced by scripts/measure_storage_footprint.py, which is committed for this reason:
+# these figures were carried here in a comment citing a provenance PROGRESS.md did not
+# have, which is the same defect as the uid comment that broke the host on 2026-08-24.
+#
+# Two runs against live venue data disagree, and the pair below is the pessimistic end of
+# both rather than either one, so the projection cannot flatter itself:
+#
+#   2026-08-18, 300s sample:  243.81 uncompressed, 21.90 compressed, 11.1x
+#   2026-08-24, 180s sample:  203.88 uncompressed, 25.96 compressed,  7.85x
+#
+# The authoritative figure is the running host's own, which the compression check below
+# prints beside these on every run once its first chunks compress. See PROGRESS.md.
+BYTES_PER_ROW_COMPRESSED=25.96
 BYTES_PER_ROW_UNCOMPRESSED=243.81
 COMPRESS_AFTER_DAYS=7
 
@@ -113,6 +122,75 @@ project_storage() {
         else printf ", already past the %d percent alert", alert
         printf "\n"
     }'
+}
+
+# The compression policy interval, from the migration that installs it. Every storage
+# figure this file reports past day seven assumes this job runs, and until 2026-08-24
+# nothing checked that it ever had.
+COMPRESS_POLICY_DAYS="${TRADINGSYS_COMPRESS_POLICY_DAYS:-7}"
+
+compression_running() {
+    # A POLICY THAT EXISTS IS NOT A POLICY THAT RAN. The retention arithmetic turns on an
+    # 11x reduction that only happens if this job executes, and a silent failure looks
+    # exactly like a young database: no compressed chunks, growth at the uncompressed
+    # rate, and about seven weeks to the alert instead of a year and a half.
+    #
+    # Three questions in order, because they have different remedies: is the policy
+    # installed, is there anything old enough to compress, and did it actually happen.
+    local policy
+    policy="$($COMPOSE exec -T db psql -qtAX -U "${POSTGRES_USER:-tradingsys}" -d "${POSTGRES_DB:-tradingsys}" \
+        -c "SELECT count(*) FROM timescaledb_information.jobs WHERE proc_name = 'policy_compression' AND hypertable_name = 'ticks'" 2>&1)" \
+        || { echo "could not read the compression policy: $(tail -1 <<<"$policy")"; return 1; }
+    if [[ "$policy" != "1" ]]; then
+        echo "expected exactly one compression policy on ticks, found '${policy}'. Without it nothing is ever compressed and storage grows at the uncompressed rate"
+        return 1
+    fi
+
+    local oldest
+    oldest="$($COMPOSE exec -T db psql -qtAX -U "${POSTGRES_USER:-tradingsys}" -d "${POSTGRES_DB:-tradingsys}" \
+        -c "SELECT COALESCE(EXTRACT(epoch FROM now() - min(ts))::bigint, 0) FROM ticks" 2>/dev/null)"
+    [[ "$oldest" =~ ^[0-9]+$ ]] || oldest=0
+    if [[ "$oldest" -lt $((COMPRESS_POLICY_DAYS * 86400)) ]]; then
+        # Not a failure. Nothing is old enough yet, and saying so is different from
+        # saying compression works.
+        echo "policy installed; oldest tick is $((oldest / 3600))h old, under the ${COMPRESS_POLICY_DAYS} day threshold, so nothing is due for compression yet"
+        return 0
+    fi
+
+    local stats
+    stats="$($COMPOSE exec -T db psql -qtAX -U "${POSTGRES_USER:-tradingsys}" -d "${POSTGRES_DB:-tradingsys}" \
+        -c "SELECT count(*), COALESCE(sum(before_compression_total_bytes), 0), COALESCE(sum(after_compression_total_bytes), 0) FROM chunk_compression_stats('ticks') WHERE compression_status = 'Compressed'" 2>&1)" \
+        || { echo "could not read compression stats: $(tail -1 <<<"$stats")"; return 1; }
+    local chunks before after
+    IFS='|' read -r chunks before after <<<"$stats"
+    if ! [[ "$chunks" =~ ^[0-9]+$ ]]; then
+        echo "compression stats did not answer with a chunk count: $(head -c 200 <<<"$stats")"
+        return 1
+    fi
+    if [[ "$chunks" -eq 0 ]]; then
+        echo "data is $((oldest / 86400)) days old and NOT ONE CHUNK IS COMPRESSED. The policy is installed and is not doing its work, so every storage projection here is wrong by roughly an order of magnitude"
+        return 1
+    fi
+
+    # The newest compressed chunk says whether it is still running, as opposed to having
+    # run once. Existence and correct continuing action are different properties, which
+    # is the defect class this whole file keeps meeting.
+    local lag_days
+    lag_days="$($COMPOSE exec -T db psql -qtAX -U "${POSTGRES_USER:-tradingsys}" -d "${POSTGRES_DB:-tradingsys}" \
+        -c "SELECT COALESCE(EXTRACT(epoch FROM now() - max(range_end))::bigint / 86400, 999)::bigint FROM timescaledb_information.chunks WHERE hypertable_name = 'ticks' AND is_compressed" 2>/dev/null)"
+    [[ "$lag_days" =~ ^-?[0-9]+$ ]] || lag_days=999
+    local ratio="unknown"
+    if [[ "$after" =~ ^[0-9]+$ && "$after" -gt 0 ]]; then
+        ratio="$(awk -v b="$before" -v a="$after" 'BEGIN { printf "%.1fx", b / a }')"
+    fi
+    if [[ "$lag_days" -gt $((COMPRESS_POLICY_DAYS + 2)) ]]; then
+        echo "${chunks} compressed chunk(s) at ${ratio}, but the newest covers data ending ${lag_days} days ago against a ${COMPRESS_POLICY_DAYS} day policy: it ran once and has stopped"
+        return 1
+    fi
+    # The observed ratio is printed beside the constants the projection uses, so a
+    # disagreement between what was measured once and what this host actually achieves is
+    # visible on every run rather than discovered when the volume fills.
+    echo "${chunks} chunk(s) compressed, newest ends ${lag_days}d ago, observed ratio ${ratio} against the ${BYTES_PER_ROW_UNCOMPRESSED}/${BYTES_PER_ROW_COMPRESSED} the projection assumes"
 }
 
 volume_projection() {
@@ -230,6 +308,7 @@ CHECKS=(
     "volume is its own device:volume_is_its_own_device"
     "volume headroom:volume_headroom"
     "volume projection:volume_projection"
+    "compression running:compression_running"
     "systemd unit:unit_enabled"
     "containers running:containers_up"
     "app liveness /health:app_live"

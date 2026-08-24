@@ -702,7 +702,8 @@ answer:**
 | Whether `/health` should register an internal invariant such as a stalled loop detector | A decision. The empty check list is deliberate: liveness must not depend on anything external. The concern that an endpoint asserting nothing gets trusted for more than it checks is not answered by that |
 | Unchanged Bybit snapshot repeats stored as rows | The measured row counts from a successful capture, then a decision. Up to 28,800 rows per instrument per day carry no information in a quiet market. The detection rule is exact, since an unchanged repeat reuses the update id |
 | Which of the three forex options to take | A decision. A second venue adapter is real work and should be chosen rather than drifted into |
-| Retention: volume size versus retention window | A full weekday of hourly rates from the recorder, due 2026-08-25. First honest sample is 54.3 quotes per second over 16.5 minutes on a Sunday evening, which is near the 60 per second row and therefore about ten months on 60 GB rather than twenty. To be priced both ways: the volume for 24 months at the measured p95, and the retention that fits comfortably in 60 GB |
+| Retention: volume size versus retention window | **Decided 2026-08-31**, with the host's own compression ratio in hand. Nothing is dropping data meanwhile, because no retention policy exists, so there is no urgency and that is the right position to decide from. Director's stated preference, given in advance: shorten retention rather than buy disk. Analysis below |
+| Retention, superseded framing | A full weekday of hourly rates from the recorder, due 2026-08-25. First honest sample is 54.3 quotes per second over 16.5 minutes on a Sunday evening, which is near the 60 per second row and therefore about ten months on 60 GB rather than twenty. To be priced both ways: the volume for 24 months at the measured p95, and the retention that fits comfortably in 60 GB |
 | Tier 2 metric thresholds | A day of observed data from the crypto run, then figures. Set earlier they are guesses, and a threshold that fires when nothing is wrong is the one that gets ignored |
 | Tier 3 conditions promoted from logs to alerts | The run completing. Venue failure rates, reconnect churn and gap findings log today, by decision |
 | The margin above break even that the phase 8 gate requires | A stated figure, set before the paper period begins. It cannot be derived from quote data and needs real fills, so it is a judgement recorded at the gate |
@@ -710,6 +711,58 @@ answer:**
 | Whether to rerun the crypto capture on this host or somewhere that stays awake | A decision. The fixed script makes a partial capture usable rather than misleading, but a contiguous 24 hours may not be achievable here |
 
 ---
+
+### Storage: what is measured, and what the retention decision turns on
+
+**The rate profile, 2026-08-24, from the recorder itself.** Fourteen and a half hours,
+partial end hours dropped, no gaps in the hourly sequence.
+
+```
+31.0 31.3 32.4 33.7 35.7 38.1 38.5 39.2 40.1 42.2 46.4 49.3 49.4 61.2   per second
+```
+
+Mean 40.6, median 38.9, range 31.0 to 61.2, so a diurnal factor of 1.97. p95 is 61.2 by
+nearest rank on fourteen samples and 53.5 interpolated; sizing below uses 61.2.
+
+A 24 hour row count taken separately gives 3,357,304 rows, which is 38.9 per second
+combined, so the profile is stable rather than a one day artifact. It is one weekday and
+still not a week: a volatility event is a regime this has not sampled.
+
+**The row footprint, measured twice, disagreeing by 29 percent.** Reproduce with
+`scripts/measure_storage_footprint.py`. Reasoning in `docs/DECISIONS.md`.
+
+| Run | Sample | Uncompressed | Compressed | Ratio |
+|---|---|---|---|---|
+| 2026-08-18 | 300s live Bybit | 243.81 B/row | 21.90 B/row | 11.1x |
+| 2026-08-24 | 180s live Bybit, 12,938 rows | 203.88 B/row | 25.96 B/row | 7.85x |
+
+Roughly half of the uncompressed figure is the primary key index, which is most of why
+compression gains so much: compressed chunks do not carry it in the same form.
+
+**The consequences, at the pessimistic end of both runs.** 60 GiB volume, 80 percent
+Postgres operating limit, WAL at 4.5 GB, one minute bars at about 0.5 GB over two years.
+
+| At | Retention that fits | Volume needed for 24 months |
+|---|---|---|
+| Measured day, 3.36M rows | 475 days, 15.6 months | 92 GB, so buy 90 at 9.00 USD/month |
+| p95 hour sustained, 5.29M rows | 280 days, 9.2 months | 142 GB, so buy 140 at 14.00 USD/month |
+
+At the optimistic end, 11.1x, those become 18.5 months and 80 GB, and 10.9 months and
+122 GB. **The spread between the two measurements is larger than the difference between
+the options**, which is why the decision waits for the host's own figure on 2026-08-31.
+
+**What the recorder is doing until then.** Growing at the uncompressed rate, roughly
+0.86 GB a day, with the first chunks due to compress at day seven. Until that happens the
+70 percent alert is about seven weeks out, and the whole steady state case rests on a job
+that has never run here, which is what the compression check now watches.
+
+**The recommendation on the table**, accepted in principle by the director and to be
+confirmed with the day eight figures: keep the 60 GB volume, set tick retention to twelve
+months, keep the one minute bars indefinitely. The research cost is not material because
+retention drops tick resolution and not history: the per-side minute bars are separate
+materialised objects and survive, which is pinned by test rather than read from
+documentation. What needs ticks specifically is cost model calibration, and old ticks are
+the least representative input to it.
 
 ### Measurements worth not repeating
 

@@ -1958,6 +1958,62 @@ defines its checks without running them, so the storage arithmetic can be exerci
 fabricated inputs, which is the only way to test a window longer than any CI database will
 ever hold.
 
+### The storage constants have a source, and the host measures itself against them
+
+Directed by the director on 2026-08-24: a number carried in a comment with no source is
+the line 130 defect again.
+
+**The provenance existed and was outside the repository.** 243.81 and 21.90 bytes per row
+came from a one off script in the previous session's scratchpad directory, which measured
+live Bybit top of book loaded into the real schema, sized the hypertable, compressed the
+chunk, and sized it again. The method was sound. It was simply not committed, so the
+comment cited `PROGRESS.md` for a provenance `PROGRESS.md` never had.
+
+The script is now `scripts/measure_storage_footprint.py`, alongside the other measurements
+that are not part of the running system.
+
+**Re-running it six days later disagrees by 29 percent**, which is why this mattered:
+
+| Run | Sample | Uncompressed | Compressed | Ratio |
+|---|---|---|---|---|
+| 2026-08-18 | 300s live | 243.81 B | 21.90 B | 11.1x |
+| 2026-08-24 | 180s live, 12,938 rows | 203.88 B | 25.96 B | 7.85x |
+
+Neither is wrong. They are two small chunks built in one pass from different market
+conditions, and a chunk of a few thousand rows is not the chunk a day of production
+builds. **The projection now carries the pessimistic end of each**, 243.81 uncompressed
+and 25.96 compressed, so it cannot flatter itself while the range is open.
+
+**The real remedy is that the host measures its own.** The compression check prints the
+observed ratio from `chunk_compression_stats` beside the constants the projection assumes,
+on every run, once the first chunks compress. A constant that disagrees with reality is
+then visible every time an operator looks, rather than discovered when the volume fills.
+The authoritative figures arrive on 2026-08-31 from the running host, and they replace
+both rows above.
+
+**One caution, learned while testing the check.** A synthetic chunk built from a repeating
+price cycle compressed at 48.7x, which is meaningless. Compression ratios are properties
+of real data shape, and any figure produced from generated data should be discarded.
+
+### A policy that exists is not a policy that ran, and now something checks
+
+Directed by the director on 2026-08-24, ahead of the retention decision and for a reason
+that reorders the two.
+
+Every storage figure past day seven assumes the compression job runs. That job has never
+executed on this host, and nothing looked. A silent failure is indistinguishable from a
+young database: no compressed chunks, growth at the uncompressed rate, and about seven
+weeks to the alert instead of a year and a half.
+
+`healthcheck.sh` now asks three questions in order, because they have different remedies.
+Is the policy installed. Is anything old enough to compress, which on a young host is
+reported as "not due yet" rather than as success, since those are different states. And
+did it actually happen, meaning compressed chunks exist and **the newest one covers data
+recent enough that the job is still running rather than having run once**.
+
+That last clause is the defect class this project keeps meeting, arriving in the storage
+layer: existence and correct continuing action are different properties.
+
 ---
 
 ## Rejected, with the reason, so they are not revisited
